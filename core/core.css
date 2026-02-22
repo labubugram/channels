@@ -1,0 +1,496 @@
+/* core.css - Telegram Mirror Core Styles */
+:root {
+    /* Light theme */
+    --bg-primary: #ffffff;
+    --bg-secondary: #f4f4f5;
+    --surface: #ffffff;
+    --surface-hover: #f0f0f4;
+    --border: #e9e9ed;
+    --text-primary: #ededed;
+    --text-secondary: #818c99;
+    --text-meta: #6d7885;
+    --accent: #16202b;
+    --accent-hover: #2a7ad0;
+    --accent-light: #e8f0fe;
+    --green: #50a95e;
+    --red: #ed4a4a;
+    --blue: #3a9cea;
+    --orange: #f39c12;
+    --purple: #8e44ad;
+    --header-bg: rgba(255,255,255,0.92);
+    --header-shadow: 0 2px 4px rgba(0,0,0,0.04);
+    --media-radius: 12px;
+    --card-radius: 16px;
+    --font: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+    --font-mono: 'SF Mono', 'Roboto Mono', monospace;
+    --shadow-sm: 0 1px 3px rgba(0,0,0,0.02);
+    --safe-top: env(safe-area-inset-top, 0px);
+    --safe-bottom: env(safe-area-inset-bottom, 0px);
+    --new-post-bg: rgba(51, 144, 236, 0.1);
+    --edited-color: #8e9aa3;
+    --delete-bg: rgba(237, 74, 74, 0.1);
+    --status-dot-size: 10px;
+}
+
+@media (prefers-color-scheme: dark) {
+    :root {
+        --bg-primary: #0e1621;
+        --bg-secondary: #17212b;
+        --surface: #17212b;
+        --surface-hover: #202b36;
+        --border: #2b3945;
+        --text-primary: #ffffff;
+        --text-secondary: #8e9aa3;
+        --text-meta: #707d8b;
+        --accent: #6ab3f3;
+        --accent-hover: #5fa8e8;
+        --accent-light: #253746;
+        --header-bg: rgba(23,33,43,0.92);
+        --header-shadow: 0 2px 4px rgba(0,0,0,0.2);
+        --new-post-bg: rgba(106, 179, 243, 0.15);
+        --edited-color: #707d8b;
+        --delete-bg: rgba(237, 74, 74, 0.15);
+    }
+}
+
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+    -webkit-tap-highlight-color: transparent;
+}
+
+body {
+    font-family: var(--font);
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    line-height: 1.46668;
+    font-size: 16px;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+}
+
+/* Telegram Header */
+.tg-header {
+    position: sticky;
+    top: 0;
+    z-index: 90;
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    background: var(--header-bg);
+    border-bottom: 1px solid var(--border);
+    padding-top: var(--safe-top);
+}
+
+.channel-profile {
+    max-width: 800px;
+    margin: 0 auto;
+    padding: 16px 20px;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+}
+
+.channel-avatar {
+    width: 54px;
+    height: 54px;
+    border-radius: 50%;
+    background: linear-gradient(145deg, var(--accent), #2a5c8a);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 24px;
+    font-weight: 600;
+    color: white;
+    box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+    flex-shrink: 0;
+}
+
+.channel-info {
+    flex: 1;
+    min-width: 0;
+}
+
+.channel-title-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 4px;
+}
+
+.channel-title {
+    font-size: 20px;
+    font-weight: 700;
+    letter-spacing: -0.3px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.status-dot {
+    width: var(--status-dot-size);
+    height: var(--status-dot-size);
+    border-radius: 50%;
+    background: var(--green);
+    animation: pulse 2s infinite;
+    box-shadow: 0 0 0 rgba(80, 169, 94, 0.4);
+}
+
+.status-dot.offline {
+    background: var(--red);
+    animation: none;
+}
+
+@keyframes pulse {
+    0% { box-shadow: 0 0 0 0 rgba(80, 169, 94, 0.7); }
+    70% { box-shadow: 0 0 0 6px rgba(80, 169, 94, 0); }
+    100% { box-shadow: 0 0 0 0 rgba(80, 169, 94, 0); }
+}
+
+.channel-meta {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--text-secondary);
+    font-size: 14px;
+}
+
+.channel-badge {
+    background: var(--accent-light);
+    color: var(--accent);
+    padding: 2px 10px;
+    border-radius: 12px;
+    font-size: 12px;
+    font-weight: 500;
+}
+
+.new-posts-badge {
+    background: var(--accent);
+    color: white;
+    border-radius: 20px;
+    padding: 12px 12px;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+    transition: all 0.2s;
+    white-space: nowrap;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.new-posts-badge.hidden {
+    display: none;
+}
+
+.new-posts-badge:hover {
+    background: var(--accent-hover);
+}
+
+.new-dot {
+    width: 8px;
+    height: 8px;
+    background: #ffeb3b;
+    border-radius: 50%;
+    animation: pulse 1.5s infinite;
+}
+
+/* Feed */
+.feed {
+    max-width: 800px;
+    margin: 0 auto;
+    padding: 8px 10px 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+/* Post */
+.post {
+    background: var(--surface);
+    border-radius: var(--card-radius);
+    border: 1px solid var(--border);
+    overflow: hidden;
+    transition: all 0.3s ease;
+    opacity: 0;
+    transform: translateY(20px);
+    animation: fadeIn 0.5s forwards;
+}
+
+@keyframes fadeIn {
+    to { opacity: 1; transform: translateY(0); }
+}
+
+.post.new {
+    background: var(--new-post-bg);
+    border-color: var(--accent);
+}
+
+.post.updated {
+    background: var(--accent-light);
+}
+
+.post.deleted {
+    opacity: 0;
+    transform: translateX(-20px);
+    pointer-events: none;
+    transition: opacity 0.3s ease, transform 0.3s ease;
+}
+
+.post-content {
+    padding: 16px 16px 12px;
+}
+
+.post-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 20px;
+}
+
+.post-avatar {
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: white;
+    font-weight: 600;
+    font-size: 15px;
+    flex-shrink: 0;
+}
+
+.post-author-info {
+    flex: 1;
+    min-width: 0;
+}
+
+.post-author-name {
+    font-weight: 650;
+    font-size: 15px;
+    color: var(--text-primary);
+    margin-bottom: 0px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+
+.post-date {
+    color: var(--text-secondary);
+    font-size: 13px;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex-wrap: wrap;
+}
+
+.edited-mark {
+    font-size: 11px;
+    color: var(--edited-color);
+    font-style: italic;
+}
+
+.post-text {
+    font-size: 15px;
+    line-height: 1.4;
+    margin-bottom: 10px;
+    white-space: normal;
+    word-wrap: break-word;
+    color: var(--text-primary);
+}
+
+.post-text a {
+    color: var(--accent);
+    text-decoration: none;
+}
+
+.post-text a:hover {
+    text-decoration: underline;
+}
+
+.media-container {
+    border-radius: var(--media-radius);
+    overflow: hidden;
+    margin-bottom: 12px;
+    background: var(--bg-secondary);
+    position: relative;
+    cursor: pointer;
+    min-height: 200px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid var(--border);
+}
+
+.media-container img,
+.media-container video {
+    width: 100%;
+    max-height: 500px;
+    object-fit: contain;
+    background: #000;
+    display: block;
+}
+
+.media-loading {
+    text-align: center;
+    color: var(--text-secondary);
+    padding: 40px 20px;
+}
+
+.media-error {
+    text-align: center;
+    color: var(--text-secondary);
+    padding: 40px 20px;
+    background: var(--bg-secondary);
+}
+
+.media-unavailable {
+    text-align: center;
+    color: var(--text-secondary);
+    padding: 20px;
+    background: var(--bg-secondary);
+    border-radius: var(--media-radius);
+    font-style: italic;
+}
+
+.post-footer {
+    display: flex;
+    align-items: center;
+    padding: 8px 15px 8px;
+    border-top: 1px solid var(--border);
+    color: var(--text-secondary);
+    font-size: 14px;
+}
+
+.views-count {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+/* Lightbox */
+.lightbox {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0,0,0,0.95);
+    z-index: 1000;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    backdrop-filter: blur(10px);
+}
+
+.lightbox.active {
+    display: flex;
+}
+
+.lightbox-content {
+    max-width: 90vw;
+    max-height: 90vh;
+    position: relative;
+}
+
+.lightbox-content img,
+.lightbox-content video {
+    max-width: 100%;
+    max-height: 90vh;
+    object-fit: contain;
+    border-radius: 8px;
+}
+
+.lightbox-close {
+    position: absolute;
+    top: 20px;
+    right: 20px;
+    width: 44px;
+    height: 44px;
+    background: rgba(0,0,0,0.5);
+    backdrop-filter: blur(4px);
+    border: none;
+    border-radius: 50%;
+    color: white;
+    font-size: 24px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1001;
+}
+
+/* Toast */
+.toast {
+    position: fixed;
+    bottom: 20px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 30px;
+    padding: 10px 20px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+    z-index: 1000;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    animation: slideUp 0.3s ease;
+    max-width: 90%;
+}
+
+.toast.info { border-left: 4px solid var(--accent); }
+.toast.success { border-left: 4px solid var(--green); }
+.toast.warning { border-left: 4px solid var(--orange); }
+.toast.error { border-left: 4px solid var(--red); }
+
+@keyframes slideUp {
+    from { opacity: 0; transform: translate(-50%, 20px); }
+    to { opacity: 1; transform: translate(-50%, 0); }
+}
+
+/* Scroll to top */
+.scroll-top {
+    position: fixed;
+    bottom: 20px;
+    right: 20px;
+    width: 48px;
+    height: 48px;
+    border-radius: 50%;
+    background: #17212b;
+    color: white;
+    border: none;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+    font-size: 24px;
+    cursor: pointer;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    z-index: 89;
+    transition: transform 0.2s;
+}
+
+.scroll-top:hover {
+    transform: scale(1.1);
+}
+
+.infinite-scroll-trigger {
+    height: 20px;
+    margin: 10px 0 20px;
+    text-align: center;
+    color: var(--text-secondary);
+    font-size: 13px;
+}
+
+@media (max-width: 600px) {
+    .channel-profile { padding: 12px 16px; }
+    .channel-title { font-size: 18px; }
+    .post-content { padding: 14px 14px 10px; }
+    .new-posts-badge { padding: 12px 12px; font-size: 12px; }
+    :root { 
+        --status-dot-size: 8px;
+    }
+}
