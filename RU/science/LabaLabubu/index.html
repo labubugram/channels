@@ -1,1 +1,2052 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline' https:; script-src 'self' 'unsafe-inline' 'unsafe-eval'; img-src 'self' data: blob: https:; media-src 'self' data: blob: https:; connect-src 'self' wss: ws: https:;">
+    <title>Telegram Mirror · Multi-channel</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            -webkit-tap-highlight-color: transparent;
+        }
+        :root {
+            --bg-primary: #f4f4f5;
+            --bg-secondary: #f4f4f5;
+            --surface: #ffffff88;
+            --surface-hover: #f0f0f4;
+            --border: #e9e9ed;
+            --text-primary: #000000;
+            --text-secondary: #818c99;
+            --text-meta: #6d7885;
+            --accent: #2481cc;
+            --accent-hover: #1b6ca8;
+            --accent-light: #e8f0fe;
+            --green: #50a95e;
+            --red: #ed4a4a;
+            --blue: #3a9cea;
+            --orange: #f39c12;
+            --purple: #8e44ad;
+            --header-bg: rgba(255, 255, 255, 0.7);
+            --header-shadow: 0 2px 4px rgba(0, 0, 0, 0.04);
+            --media-radius: 0px;
+            --card-radius: 16px;
+            --font: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            --font-mono: 'SF Mono', 'Roboto Mono', monospace;
+            --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.02);
+            --safe-top: env(safe-area-inset-top, 0px);
+            --safe-bottom: env(safe-area-inset-bottom, 0px);
+            --new-post-bg: rgba(51, 144, 236, 0.1);
+            --edited-color: #5180b3;
+            --delete-bg: rgba(237, 74, 74, 0.1);
+            --status-dot-size: 10px;
+            --channel-selector-height: 70px;
+            --channel-selector-bottom: 70px;
+            --transition-duration: 0.2s;
+            --animation-duration: 0.3s;
+        }
+        :root[data-theme="dark"] {
+            --bg-primary: #0e1621;
+            --bg-secondary: #17212b;
+            --surface: #17212b;
+            --surface-hover: #202b36;
+            --border: #2b3945;
+            --text-primary: #ffffff;
+            --text-secondary: #8e9aa3;
+            --text-meta: #707d8b;
+            --accent: #6ab3f3;
+            --accent-hover: #5fa8e8;
+            --accent-light: #253746;
+            --header-bg: rgba(23, 33, 43, 0.7);
+            --header-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+            --new-post-bg: rgba(106, 179, 243, 0.15);
+            --edited-color: #707d8b;
+            --delete-bg: rgba(237, 74, 74, 0.15);
+        }
+        @media (prefers-color-scheme: dark) {
+            :root:not([data-theme="light"]) {
+                --bg-primary: #0e1621;
+                --bg-secondary: #17212b;
+                --surface: #17212b78;
+                --surface-hover: #202b36;
+                --border: #2b3945;
+                --text-primary: #ffffff;
+                --text-secondary: #8e9aa3;
+                --text-meta: #707d8b;
+                --accent: #6ab3f3;
+                --accent-hover: #5fa8e8;
+                --accent-light: #253746;
+                --header-bg: rgba(23, 33, 43, 0.7);
+                --header-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+                --new-post-bg: rgba(106, 179, 243, 0.15);
+                --edited-color: #707d8b;
+                --delete-bg: rgba(237, 74, 74, 0.15);
+            }
+        }
 
+        /* ========== BACKGROUND VIDEO ========== */
+        .bg-video {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            z-index: -1;
+            opacity: 0;
+            transition: opacity 5s ease-in-out;
+            pointer-events: none;
+            will-change: opacity;
+        }
+        .bg-video.visible {
+            opacity: 0.1;
+        }
+        :root[data-theme="light"] .bg-video {
+            opacity: 0 !important;
+            transition: none;
+        }
+        @media (max-width: 768px) {
+            .bg-video.visible {
+                opacity: 0.1;
+            }
+        }
+        @media (prefers-reduced-motion: reduce) {
+            .bg-video {
+                transition: none;
+            }
+        }
+
+        body {
+            font-family: var(--font);
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            line-height: 1.46668;
+            font-size: 16px;
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
+            padding-bottom: var(--channel-selector-bottom);
+            transition: background-color var(--transition-duration) ease,
+                       color var(--transition-duration) ease;
+        }
+
+        /* ========== CHANNEL SELECTOR ========== */
+        .channel-selector {
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            z-index: 100;
+            display: flex;
+            overflow-x: auto;
+            overflow-y: hidden;
+            -webkit-overflow-scrolling: touch;
+            scrollbar-width: none;
+            gap: 8px;
+            padding: 8px 16px;
+            background: var(--surface);
+            backdrop-filter: blur(35px);
+            -webkit-backdrop-filter: blur(35px);
+            white-space: nowrap;
+            height: var(--channel-selector-height);
+            justify-content: center;
+            box-shadow: 0 -2px 10px rgba(0, 0, 0, 0.05);
+            transition: background-color var(--transition-duration) ease,
+                       box-shadow var(--transition-duration) ease;
+        }
+        .channel-selector::-webkit-scrollbar {
+            display: none;
+        }
+        .channel-tab {
+            display: inline-flex;
+            align-items: center;
+            padding: 5px 20px;
+            border-radius: 50px;
+            background: var(--surface-hover);
+            color: var(--text-secondary);
+            font-size: 12px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all var(--transition-duration) cubic-bezier(0.4, 0, 0.2, 1);
+            border: 1px solid transparent;
+            flex-shrink: 0;
+            flex-direction: column;
+            will-change: transform, background-color;
+        }
+        .channel-tab:hover {
+            background: var(--border);
+            transform: translateY(-1px);
+        }
+        .channel-tab:active {
+            transform: translateY(0);
+        }
+        .channel-tab.active {
+            background: var(--accent);
+            color: white;
+        }
+        .channel-tab-avatar {
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 20px;
+            color: var(--accent);
+            transition: color var(--transition-duration) ease;
+        }
+        .channel-tab.active .channel-tab-avatar {
+            color: white;
+        }
+        .channel-tab-badge {
+            background: var(--accent-light);
+            color: var(--accent);
+            padding: 2px 6px;
+            border-radius: 12px;
+            font-size: 10px;
+            font-weight: 600;
+            transition: all var(--transition-duration) ease;
+        }
+        .channel-tab.active .channel-tab-badge {
+            background: rgba(255, 255, 255, 0.2);
+            color: white;
+        }
+
+        /* ========== HEADER ========== */
+        .tg-header {
+            position: sticky;
+            top: 0;
+            z-index: 90;
+            backdrop-filter: blur(35px);
+            -webkit-backdrop-filter: blur(35px);
+            background: var(--header-bg);
+            padding-top: var(--safe-top);
+            transition: background-color var(--transition-duration) ease;
+        }
+        .channel-profile {
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 15px 20px;
+            display: flex;
+            align-items: center;
+            gap: 16px;
+        }
+        .channel-avatar {
+            width: 54px;
+            height: 54px;
+            border-radius: 50%;
+            background: linear-gradient(145deg, var(--accent), #2a5c8a);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 22px;
+            font-weight: 600;
+            color: white;
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+            flex-shrink: 0;
+            cursor: pointer;
+            transition: transform var(--transition-duration) cubic-bezier(0.4, 0, 0.2, 1),
+                        box-shadow var(--transition-duration) ease;
+            will-change: transform;
+        }
+        .channel-avatar:hover {
+            transform: scale(1.05);
+            box-shadow: 0 6px 12px rgba(0, 0, 0, 0.15);
+        }
+        .channel-avatar:active {
+            transform: scale(0.95);
+        }
+        .channel-avatar.nekhebet-avatar {
+            background: url('nekhebet.svg') center / cover no-repeat;
+            background-color: transparent;
+            color: transparent !important;
+            font-size: 0 !important;
+        }
+        .channel-info {
+            flex: 1;
+            min-width: 0;
+        }
+        .channel-title-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 2px;
+        }
+        .channel-title {
+            font-size: 20px;
+            font-weight: 700;
+            letter-spacing: -0.3px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            transition: color var(--transition-duration) ease;
+        }
+        .status-dot {
+            width: var(--status-dot-size);
+            height: var(--status-dot-size);
+            border-radius: 50%;
+            background: var(--green);
+            animation: pulse 2s infinite;
+            box-shadow: 0 0 0 rgba(80, 169, 94, 0.4);
+            transition: background-color var(--transition-duration) ease;
+        }
+        .status-dot.offline {
+            background: var(--red);
+            animation: none;
+        }
+        @keyframes pulse {
+            0% { box-shadow: 0 0 0 0 rgba(80, 169, 94, 0.7); }
+            70% { box-shadow: 0 0 0 6px rgba(80, 169, 94, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(80, 169, 94, 0); }
+        }
+        .channel-meta {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            color: var(--text-secondary);
+            font-size: 14px;
+            transition: color var(--transition-duration) ease;
+        }
+        .channel-badge {
+            background: var(--accent-light);
+            color: var(--accent);
+            padding: 2px 10px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 500;
+            transition: all var(--transition-duration) ease;
+        }
+        .new-posts-badge {
+            background: var(--accent);
+            color: white;
+            border-radius: 20px;
+            padding: 12px 12px;
+            font-size: 12px;
+            font-weight: 600;
+            cursor: pointer;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+            transition: all var(--transition-duration) cubic-bezier(0.4, 0, 0.2, 1);
+            white-space: nowrap;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            will-change: transform, opacity;
+        }
+        .new-posts-badge.hidden {
+            display: none;
+        }
+        .new-posts-badge:hover {
+            background: var(--accent-hover);
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+        }
+        .new-posts-badge:active {
+            transform: translateY(0);
+        }
+        .new-dot {
+            width: 8px;
+            height: 8px;
+            background: #ffeb3b;
+            border-radius: 50%;
+            animation: pulse 1.5s infinite;
+        }
+
+        /* ========== FEED & POSTS ========== */
+        .feed {
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 8px 10px calc(15px + var(--channel-selector-height));
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            contain: layout style paint;
+        }
+
+        .post {
+            background: var(--surface);
+            border-radius: var(--card-radius);
+            overflow: hidden;
+            transition: all 0.4s cubic-bezier(0.23, 1, 0.32, 1);
+            opacity: 0;
+            transform: translateY(20px);
+            will-change: transform, opacity, background-color;
+        }
+
+        .post.visible {
+            opacity: 1;
+            transform: translateY(0);
+        }
+
+        .post.new {
+            animation: newPostHighlight 3000ms ease-out forwards;
+        }
+
+        @keyframes newPostHighlight {
+            0%   { background: var(--new-post-bg); }
+            100% { background: var(--surface); }
+        }
+
+        .post.updated {
+            background: var(--accent-light);
+        }
+
+        .post.deleted {
+            opacity: 0;
+            transform: translateX(-20px);
+            pointer-events: none;
+            transition: opacity var(--animation-duration) ease,
+                        transform var(--animation-duration) ease;
+        }
+
+        .post-content {
+            padding: 20px 20px 10px;
+        }
+
+        .post-header {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+
+        .post-avatar {
+            width: 36px;
+            height: 36px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-weight: 600;
+            font-size: 15px;
+            flex-shrink: 0;
+        }
+
+        .post-author-info {
+            flex: 1;
+            min-width: 0;
+        }
+
+        .post-author-name {
+            font-weight: 650;
+            font-size: 15px;
+            color: var(--text-primary);
+            margin-bottom: 0px;
+            display: flex;
+            align-items: baseline;
+            gap: 6px;
+            flex-wrap: wrap;
+            transition: color var(--transition-duration) ease;
+        }
+
+        .post-date {
+            color: var(--text-secondary);
+            font-size: 12px;
+            display: flex;
+            align-items: baseline;
+            gap: 4px;
+            flex-wrap: wrap;
+            transition: color var(--transition-duration) ease;
+        }
+
+        .edited-mark {
+            font-size: 10px;
+            color: var(--edited-color);
+        }
+
+        .post-text {
+            font-size: 15px;
+            line-height: 1.4;
+            margin-bottom: 20px;
+            white-space: normal;
+            word-wrap: break-word;
+            color: var(--text-primary);
+            transition: color var(--transition-duration) ease;
+        }
+
+        .media-container {
+            border-radius: var(--media-radius);
+            overflow: hidden;
+            margin-bottom: 12px;
+            background: var(--bg-secondary);
+            position: relative;
+            cursor: pointer;
+            min-height: 200px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: background-color var(--transition-duration) ease;
+        }
+
+        .media-container img,
+        .media-container video {
+            width: 100%;
+            max-height: 500px;
+            object-fit: contain;
+            display: block;
+        }
+
+        .media-container video {
+            background: #000;
+        }
+
+        .media-loading {
+            text-align: center;
+            color: var(--text-secondary);
+            padding: 40px 20px;
+            background: var(--bg-secondary);
+            border-radius: var(--media-radius);
+            border: 1px dashed var(--border);
+            transition: all var(--transition-duration) ease;
+        }
+
+        .media-error {
+            text-align: center;
+            color: var(--text-secondary);
+            padding: 40px 20px;
+            background: var(--bg-secondary);
+            border-radius: var(--media-radius);
+            border: 1px solid var(--red);
+            transition: all var(--transition-duration) ease;
+        }
+
+        .media-unavailable {
+            text-align: center;
+            color: var(--text-secondary);
+            padding: 20px;
+            background: var(--bg-secondary);
+            border-radius: var(--media-radius);
+            font-style: italic;
+            border: 1px solid var(--border);
+            transition: all var(--transition-duration) ease;
+        }
+
+        .post-footer {
+            display: flex;
+            align-items: center;
+            padding: 8px 15px 8px;
+            border-top: 3px solid #00000005;
+            color: var(--text-secondary);
+            font-size: 14px;
+            transition: all var(--transition-duration) ease;
+        }
+
+        .views-count {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+
+        /* ========== TYPOGRAPHY ========== */
+        .tg-code-block {
+            background: var(--bg-secondary);
+            padding: 16px;
+            border-radius: 12px;
+            overflow-x: auto;
+            font-family: var(--font-mono);
+            font-size: 13px;
+            line-height: 1.45;
+            margin: 12px 0;
+            border: 1px solid var(--border);
+            position: relative;
+            transition: all var(--transition-duration) ease;
+        }
+
+        .tg-code-block::before {
+            content: '```';
+            position: absolute;
+            top: 8px;
+            right: 12px;
+            color: var(--text-meta);
+            font-size: 12px;
+            opacity: 0.5;
+            transition: color var(--transition-duration) ease;
+        }
+
+        .tg-inline-code {
+            background: var(--bg-secondary);
+            padding: 2px 6px;
+            border-radius: 6px;
+            font-family: var(--font-mono);
+            font-size: 0.9em;
+            color: var(--accent);
+            border: 1px solid var(--border);
+            transition: all var(--transition-duration) ease;
+        }
+
+        .tg-quote {
+            border-left: 3px solid var(--accent);
+            padding: 8px 0 8px 12px;
+            margin: 8px 0;
+            color: var(--text-secondary);
+            background: var(--bg-secondary);
+            border-radius: 0 8px 8px 0;
+            transition: all var(--transition-duration) ease;
+        }
+
+        .tg-quote.level-2 {
+            border-left-color: var(--green);
+            margin-left: 20px;
+        }
+
+        .tg-quote.level-3 {
+            border-left-color: var(--orange);
+            margin-left: 40px;
+        }
+
+        .tg-spoiler {
+            background: var(--text-secondary);
+            color: transparent;
+            cursor: pointer;
+            transition: all var(--transition-duration) ease;
+            border-radius: 4px;
+            padding: 0 2px;
+        }
+
+        .tg-spoiler.revealed {
+            background: transparent;
+            color: inherit;
+            animation: spoilerReveal var(--animation-duration) ease;
+        }
+
+        @keyframes spoilerReveal {
+            0% {
+                filter: blur(4px);
+                opacity: 0.5;
+            }
+            100% {
+                filter: blur(0);
+                opacity: 1;
+            }
+        }
+
+        .tg-mention {
+            color: var(--accent);
+            cursor: pointer;
+            font-weight: 500;
+            transition: all var(--transition-duration) ease;
+        }
+
+        .tg-mention:hover {
+            text-decoration: underline;
+            background: var(--accent-light);
+            border-radius: 4px;
+        }
+
+        .tg-hashtag {
+            color: var(--accent);
+            cursor: pointer;
+            font-weight: 500;
+            transition: all var(--transition-duration) ease;
+        }
+
+        .tg-hashtag:hover {
+            text-decoration: underline;
+            background: var(--accent-light);
+            border-radius: 4px;
+        }
+
+        .tg-link {
+            color: var(--accent);
+            text-decoration: none;
+            border-bottom: 1px dashed var(--accent-light);
+            word-break: break-all;
+            transition: all var(--transition-duration) ease;
+        }
+
+        .tg-link:hover {
+            border-bottom-style: solid;
+        }
+
+        .tg-link::after {
+            content: attr(data-domain);
+            font-size: 10px;
+            color: var(--text-meta);
+            margin-left: 4px;
+            text-transform: lowercase;
+            transition: color var(--transition-duration) ease;
+        }
+
+        .tg-sticker {
+            max-width: 200px;
+            max-height: 200px;
+            object-fit: contain;
+            cursor: pointer;
+            transition: transform var(--transition-duration) cubic-bezier(0.4, 0, 0.2, 1);
+            will-change: transform;
+        }
+
+        .tg-sticker:hover {
+            transform: scale(1.05);
+        }
+
+        /* ========== LIGHTBOX ========== */
+        .lightbox {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.95);
+            z-index: 1000;
+            display: none;
+            align-items: center;
+            justify-content: center;
+            backdrop-filter: blur(10px);
+            transition: opacity var(--animation-duration) ease;
+        }
+
+        .lightbox.active {
+            display: flex;
+            animation: lightboxFadeIn var(--animation-duration) ease;
+        }
+
+        @keyframes lightboxFadeIn {
+            from {
+                opacity: 0;
+            }
+            to {
+                opacity: 1;
+            }
+        }
+
+        .lightbox-content {
+            max-width: 90vw;
+            max-height: 90vh;
+            position: relative;
+            animation: lightboxScaleIn var(--animation-duration) cubic-bezier(0.4, 0, 0.2, 1);
+        }
+
+        @keyframes lightboxScaleIn {
+            from {
+                transform: scale(0.9);
+                opacity: 0;
+            }
+            to {
+                transform: scale(1);
+                opacity: 1;
+            }
+        }
+
+        .lightbox-content img,
+        .lightbox-content video {
+            max-width: 100%;
+            max-height: 90vh;
+            object-fit: contain;
+            border-radius: 8px;
+        }
+
+        .lightbox-close {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            width: 44px;
+            height: 44px;
+            background: rgba(0, 0, 0, 0.5);
+            backdrop-filter: blur(4px);
+            border: none;
+            border-radius: 50%;
+            color: white;
+            font-size: 24px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 1001;
+            transition: all var(--transition-duration) ease;
+            will-change: transform, background-color;
+        }
+
+        .lightbox-close:hover {
+            background: rgba(0, 0, 0, 0.7);
+            transform: scale(1.1);
+        }
+
+        .lightbox-close:active {
+            transform: scale(0.9);
+        }
+
+        /* ========== SCROLL TOP BUTTON ========== */
+        .scroll-top {
+            position: fixed;
+            bottom: calc(20px + var(--channel-selector-height));
+            right: 20px;
+            width: 48px;
+            height: 48px;
+            border-radius: 50%;
+            background: var(--surface-hover);
+            color: var(--text-primary);
+            border: none;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+            font-size: 24px;
+            cursor: pointer;
+            display: none;
+            align-items: center;
+            justify-content: center;
+            z-index: 89;
+            transition: all var(--transition-duration) cubic-bezier(0.4, 0, 0.2, 1);
+            will-change: transform, opacity, background-color;
+        }
+
+        .scroll-top:hover {
+            transform: scale(1.1);
+            background: var(--border);
+        }
+
+        .scroll-top:active {
+            transform: scale(0.9);
+        }
+
+        /* ========== INFINITE SCROLL ========== */
+        .infinite-scroll-trigger {
+            height: 20px;
+            margin: 10px 0 calc(var(--channel-selector-height) + 10px);
+            text-align: center;
+            color: var(--text-secondary);
+            font-size: 13px;
+            transition: color var(--transition-duration) ease;
+        }
+
+        .skeleton {
+            background: linear-gradient(90deg,
+                var(--surface) 25%,
+                var(--surface-hover) 50%,
+                var(--surface) 75%);
+            background-size: 200% 100%;
+            animation: loading 1.5s infinite;
+            border-radius: var(--card-radius);
+            height: 200px;
+            margin-bottom: 12px;
+        }
+
+        @keyframes loading {
+            0% { background-position: 200% 0; }
+            100% { background-position: -200% 0; }
+        }
+
+        @media (max-width: 600px) {
+            .channel-profile {
+                padding: 12px 16px;
+            }
+            .channel-title {
+                font-size: 18px;
+            }
+            .post-content {
+                padding: 14px 14px 10px;
+            }
+            .new-posts-badge {
+                padding: 12px 12px;
+                font-size: 12px;
+            }
+            :root {
+                --status-dot-size: 8px;
+                --channel-selector-height: 70px;
+                --channel-selector-bottom: 70px;
+                --transition-duration: 0.15s;
+            }
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+            * {
+                animation-duration: 0.01ms !important;
+                animation-iteration-count: 1 !important;
+                transition-duration: 0.01ms !important;
+                scroll-behavior: auto !important;
+            }
+        }
+
+        :root {
+            transition: background-color 0.35s ease,
+                       color 0.35s ease,
+                       border-color 0.35s ease;
+        }
+
+        .theme-transitioning * {
+            transition: background-color 0.35s ease,
+                       color 0.35s ease,
+                       border-color 0.35s ease !important;
+        }
+
+        .tg-header,
+        .channel-selector,
+        .post,
+        .media-container,
+        .toast {
+            transition: all 0.35s cubic-bezier(0.4, 0, 0.2, 1) !important;
+        }
+    </style>
+</head>
+<body>
+    <video class="bg-video" id="bgVideo" autoplay loop muted playsinline preload="auto">
+        <source src="bg-video-dark.mp4" type="video/mp4">
+    </video>
+    <div id="app">
+        <div class="tg-header">
+            <div class="channel-profile">
+                <div class="channel-avatar nekhebet-avatar" id="channelAvatar" title="Click to toggle theme"></div>
+                <div class="channel-info">
+                    <div class="channel-title-row">
+                        <span class="channel-title" id="channelTitle">Loading...</span>
+                        <span class="status-dot" id="statusDot"></span>
+                    </div>
+                    <div class="channel-meta">
+                        <span id="channelUsername">Loading channel info...</span>
+                        <span class="channel-badge" id="subscriberCount">realtime</span>
+                    </div>
+                </div>
+                <div class="new-posts-badge hidden" id="newPostsBadge">
+                    <span class="new-dot"></span>
+                    <span id="newPostsCount">0</span> новых
+                </div>
+            </div>
+        </div>
+        <div class="channel-selector" id="channelSelector"></div>
+        <div class="feed" id="feed"></div>
+        <div id="infiniteScrollTrigger" class="infinite-scroll-trigger">
+            ↓ Load more
+        </div>
+        <button class="scroll-top" id="scrollTopBtn" title="Scroll to top">
+            ↑
+        </button>
+        <div class="lightbox" id="lightbox">
+            <button class="lightbox-close" id="lightboxClose">✕</button>
+            <div class="lightbox-content" id="lightboxContent"></div>
+        </div>
+    </div>
+
+    <script>
+        (function() {
+            'use strict';
+
+            const CONFIG = {
+                API_BASE: window.location.protocol === 'https:'
+                    ? `https://${window.location.hostname}:8081`
+                    : `http://${window.location.hostname}:8081`,
+                WS_BASE: window.location.protocol === 'https:'
+                    ? `wss://${window.location.hostname}:8081`
+                    : `ws://${window.location.hostname}:8081`,
+                INITIAL_LIMIT: 20,
+                MAX_RECONNECT_ATTEMPTS: 10,
+                RECONNECT_BASE_DELAY: 1000,
+                MEDIA_POLL_INTERVAL: 5000,
+                MAX_MEDIA_POLL_ATTEMPTS: 12,
+                DEDUP_TTL: 5000,
+                MAX_VISIBLE_POSTS: 100,
+                SKELETON_COUNT: 3
+            };
+
+            const State = {
+                channels: new Map(),
+                currentChannelId: null,
+                postsByChannel: new Map(),
+                postOrderByChannel: new Map(),
+                newPostsByChannel: new Map(),
+                offsetByChannel: new Map(),
+                hasMoreByChannel: new Map(),
+                isLoading: false,
+                ws: null,
+                wsConnected: false,
+                wsReconnectAttempts: 0,
+                mediaCache: new Map(),
+                mediaErrorCache: new Set(),
+                mediaPollingQueue: new Map(),
+                scrollTimeout: null,
+                recentMessages: new Map(),
+                domCache: new Map(),
+                scrollPositions: new Map(),
+                lastDocumentHeight: 0,
+
+                resetChannel(channelId) {
+                    this.postsByChannel.set(channelId, new Map());
+                    this.postOrderByChannel.set(channelId, []);
+                    this.newPostsByChannel.set(channelId, []);
+                    this.offsetByChannel.set(channelId, 0);
+                    this.hasMoreByChannel.set(channelId, true);
+                }
+            };
+
+            const ThemeManager = {
+                video: null,
+                videoTimeoutId: null,
+                init() {
+                    this.video = document.getElementById('bgVideo');
+                    const savedTheme = localStorage.getItem('theme');
+                    if (savedTheme) {
+                        document.documentElement.setAttribute('data-theme', savedTheme);
+                    } else {
+                        const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+                        document.documentElement.setAttribute('data-theme', prefersDark ? 'dark' : 'light');
+                    }
+                    this.initVideo();
+                    window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', (e) => {
+                        if (!localStorage.getItem('theme')) {
+                            const theme = e.matches ? 'dark' : 'light';
+                            document.documentElement.setAttribute('data-theme', theme);
+                        }
+                    });
+                },
+                initVideo() {
+                    if (!this.video) return;
+                    this.video.load();
+                    window.addEventListener('load', () => this.scheduleVideo());
+                    this.video.play().catch(() => {});
+                },
+                scheduleVideo() {
+                    if (this.videoTimeoutId) clearTimeout(this.videoTimeoutId);
+                    if (document.documentElement.getAttribute('data-theme') === 'dark') {
+                        this.videoTimeoutId = setTimeout(() => this.showVideo(), 10000);
+                    }
+                },
+                showVideo() {
+                    if (this.video) this.video.classList.add('visible');
+                },
+                hideVideo() {
+                    if (this.video) this.video.classList.remove('visible');
+                },
+                toggle() {
+                    const root = document.documentElement;
+                    const currentTheme = root.getAttribute('data-theme');
+                    const newTheme = currentTheme === 'dark' ? 'light' : 'dark';
+                    root.classList.add('theme-transitioning');
+                    requestAnimationFrame(() => {
+                        root.setAttribute('data-theme', newTheme);
+                        localStorage.setItem('theme', newTheme);
+                        if (newTheme === 'dark') {
+                            this.scheduleVideo();
+                        } else {
+                            if (this.videoTimeoutId) {
+                                clearTimeout(this.videoTimeoutId);
+                                this.videoTimeoutId = null;
+                            }
+                            this.hideVideo();
+                        }
+                        setTimeout(() => root.classList.remove('theme-transitioning'), 400);
+                    });
+                }
+            };
+
+            async function loadChannelConfig() {
+                try {
+                    const response = await fetch(`${CONFIG.API_BASE}/api/channels/config`);
+                    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                    const data = await response.json();
+                    if (data.channels && Array.isArray(data.channels)) {
+                        data.channels.forEach(channel => {
+                            State.channels.set(channel.id, {
+                                id: channel.id,
+                                title: channel.title || `Channel ${channel.id}`,
+                                username: channel.username || `channel_${channel.id}`,
+                                avatar: channel.avatar || '∵'
+                            });
+                            State.resetChannel(channel.id);
+                        });
+                        if (State.channels.size > 0) {
+                            State.currentChannelId = Array.from(State.channels.keys())[0];
+                        }
+                        return true;
+                    }
+                } catch (err) {
+                    const fallbackChannelId = 1394050290;
+                    State.channels.set(fallbackChannelId, {
+                        id: fallbackChannelId,
+                        title: 'Telegram Channel',
+                        username: 'channel',
+                        avatar: '∵'
+                    });
+                    State.resetChannel(fallbackChannelId);
+                    State.currentChannelId = fallbackChannelId;
+                }
+                return false;
+            }
+
+            function renderChannelSelector() {
+                const selector = document.getElementById('channelSelector');
+                if (!selector) return;
+                let html = '';
+                State.channels.forEach((channel, channelId) => {
+                    const newCount = State.newPostsByChannel.get(channelId)?.length || 0;
+                    const isActive = channelId === State.currentChannelId;
+                    html += `
+                        <div class="channel-tab ${isActive ? 'active' : ''}" data-channel-id="${channelId}" onclick="window.switchChannel(${channelId})">
+                            <span class="channel-tab-avatar">${channel.avatar}</span>
+                            <span>${channel.title}</span>
+                            ${newCount > 0 ? '<span class="channel-tab-badge">' + newCount + '</span>' : ''}
+                        </div>
+                    `;
+                });
+                selector.innerHTML = html;
+            }
+
+            window.switchChannel = async function(channelId) {
+                if (channelId === State.currentChannelId) return;
+                if (State.currentChannelId) {
+                    State.scrollPositions.set(State.currentChannelId, window.scrollY);
+                    API.cancelAllMediaPollForChannel(State.currentChannelId);
+                    UI.cacheChannelDOM(State.currentChannelId);
+                }
+                State.currentChannelId = channelId;
+                document.querySelectorAll('.channel-tab').forEach(tab => {
+                    const tabChannelId = Number(tab.dataset.channelId);
+                    tab.classList.toggle('active', tabChannelId === channelId);
+                });
+                UI.showSkeletonLoaders();
+                await loadChannelInfo(channelId);
+                if (!UI.restoreChannelDOM(channelId)) {
+                    document.getElementById('feed').innerHTML = '';
+                    const channelPosts = State.postsByChannel.get(channelId);
+                    if (channelPosts && channelPosts.size > 0) {
+                        const posts = State.postOrderByChannel.get(channelId) || [];
+                        const postsToRender = posts.map(msgId => channelPosts.get(msgId));
+                        UI.renderPosts(postsToRender, channelId);
+                    } else {
+                        await MessageLoader.loadChannelMessages(channelId, false);
+                    }
+                }
+                UI.updateNewPostsBadge();
+                const savedPosition = State.scrollPositions.get(channelId) || 0;
+                setTimeout(() => window.scrollTo(0, savedPosition), 50);
+            };
+
+            const Security = {
+                escapeHtml(unsafe) {
+                    return unsafe
+                        .replace(/&/g, "&amp;")
+                        .replace(/</g, "&lt;")
+                        .replace(/>/g, "&gt;")
+                        .replace(/"/g, "&quot;")
+                        .replace(/'/g, "&#039;")
+                        .replace(/`/g, "&#96;");
+                },
+                sanitizeUrl(url) {
+                    try {
+                        const parsed = new URL(url);
+                        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return '#';
+                        if (parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1') return '#';
+                        return url;
+                    } catch {
+                        return '#';
+                    }
+                },
+                validateMessageId(id) {
+                    return Number.isInteger(Number(id)) && Number(id) > 0;
+                },
+                validateMediaId(id) {
+                    return /^[0-9a-f-]+$/.test(id);
+                }
+            };
+
+            const Formatters = {
+                formatDate(date) {
+                    const d = new Date(date);
+                    const now = new Date();
+                    const isToday = d.toDateString() === now.toDateString();
+                    const yesterday = new Date(now);
+                    yesterday.setDate(now.getDate() - 1);
+                    const isYesterday = d.toDateString() === yesterday.toDateString();
+                    const time = d.toLocaleTimeString('ru-RU', {
+                        hour: '2-digit',
+                        minute: '2-digit',
+                        hour12: false
+                    });
+                    if (isToday) return `Сегодня в ${time}`;
+                    if (isYesterday) return `Вчера в ${time}`;
+                    return d.toLocaleDateString('ru-RU', {
+                        day: '2-digit',
+                        month: 'long',
+                        year: d.getFullYear() === now.getFullYear() ? undefined : 'numeric'
+                    }) + ` в ${time}`;
+                },
+                formatViews(views) {
+                    if (!views) return '0';
+                    if (views >= 1000000) return `${(views / 1000000).toFixed(1)}M`;
+                    if (views >= 1000) return `${(views / 1000).toFixed(1)}K`;
+                    return views.toString();
+                },
+                formatText(text, entities = []) {
+                    if (!text) return '';
+                    let escaped = Security.escapeHtml(text);
+                    escaped = escaped.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (match, linkText, url) => {
+                        const safeUrl = Security.sanitizeUrl(url);
+                        if (safeUrl === '#') return match;
+                        let domain = '';
+                        try {
+                            const urlObj = new URL(url);
+                            domain = urlObj.hostname.replace('www.', '');
+                        } catch {
+                            domain = url;
+                        }
+                        return `<a href="${safeUrl}" target="_blank" rel="noopener noreferrer nofollow" class="tg-link" title="${url}" data-domain="${domain}">${linkText}</a>`;
+                    });
+                    if (entities && entities.length > 0) {
+                        const sortedEntities = [...entities].sort((a, b) => b.offset - a.offset);
+                        for (const entity of sortedEntities) {
+                            const { offset, length, type } = entity;
+                            if (offset < 0 || offset + length > escaped.length) continue;
+                            const before = escaped.substring(0, offset);
+                            const content = escaped.substring(offset, offset + length);
+                            const after = escaped.substring(offset + length);
+                            switch (type) {
+                                case 'bold':
+                                case 'Bold':
+                                    escaped = before + `<b>${content}</b>` + after;
+                                    break;
+                                case 'italic':
+                                case 'Italic':
+                                    escaped = before + `<i>${content}</i>` + after;
+                                    break;
+                                case 'underline':
+                                case 'Underline':
+                                    escaped = before + `<u>${content}</u>` + after;
+                                    break;
+                                case 'strikethrough':
+                                case 'Strikethrough':
+                                    escaped = before + `<s>${content}</s>` + after;
+                                    break;
+                                case 'code':
+                                    escaped = before + `<code class="tg-inline-code">${content}</code>` + after;
+                                    break;
+                                case 'pre':
+                                    escaped = before + `<pre class="tg-code-block"><code>${content}</code></pre>` + after;
+                                    break;
+                                case 'spoiler':
+                                case 'Spoiler':
+                                    escaped = before + `<span class="tg-spoiler" onclick="this.classList.toggle('revealed')">${content}</span>` + after;
+                                    break;
+                                case 'text_link':
+                                    if (entity.url) {
+                                        const safeUrl = Security.sanitizeUrl(entity.url);
+                                        escaped = before + `<a href="${safeUrl}" target="_blank" rel="noopener noreferrer nofollow" class="tg-link">${content}</a>` + after;
+                                    }
+                                    break;
+                                case 'mention':
+                                    escaped = before + `<span class="tg-mention" data-mention="${content}">${content}</span>` + after;
+                                    break;
+                                case 'hashtag':
+                                    escaped = before + `<span class="tg-hashtag" data-hashtag="${content}">${content}</span>` + after;
+                                    break;
+                            }
+                        }
+                    } else {
+                        escaped = escaped.replace(/```([\s\S]*?)```/g, '<pre class="tg-code-block"><code>$1</code></pre>');
+                        escaped = escaped.replace(/`([^`]+)`/g, '<code class="tg-inline-code">$1</code>');
+                        const formatters = [
+                            { pattern: /\*\*\*(.*?)\*\*\*/g, replacement: '<b><i>$1</i></b>' },
+                            { pattern: /\*\*(.*?)\*\*/g, replacement: '<b>$1</b>' },
+                            { pattern: /__(.*?)__/g, replacement: '<u>$1</u>' },
+                            { pattern: /\*(.*?)\*/g, replacement: '<i>$1</i>' },
+                            { pattern: /_(.*?)_/g, replacement: '<i>$1</i>' },
+                            { pattern: /~~(.*?)~~/g, replacement: '<s>$1</s>' },
+                            { pattern: /\|\|(.*?)\|\|/g, replacement: '<span class="tg-spoiler" onclick="this.classList.toggle(\'revealed\')">$1</span>' }
+                        ];
+                        for (const formatter of formatters) {
+                            escaped = escaped.replace(formatter.pattern, formatter.replacement);
+                        }
+                    }
+                    escaped = escaped.replace(/(?<!href="|">)(https?:\/\/[^\s<"')]+)(?![^<]*>)/g, (url) => {
+                        const safeUrl = Security.sanitizeUrl(url);
+                        if (safeUrl === '#') return url;
+                        let displayDomain = '';
+                        try {
+                            const urlObj = new URL(url);
+                            displayDomain = urlObj.hostname.replace('www.', '');
+                        } catch {
+                            displayDomain = url;
+                        }
+                        let displayText = url;
+                        if (url.length > 50) {
+                            displayText = url.substring(0, 40) + '…' + url.substring(url.length - 10);
+                        }
+                        return `<a href="${safeUrl}" target="_blank" rel="noopener noreferrer nofollow" class="tg-link" data-domain="${displayDomain}" title="${url}">${displayText}</a>`;
+                    });
+                    escaped = escaped.replace(/^&gt;&gt;&gt; (.*)$/gm, '<blockquote class="tg-quote level-3">$1</blockquote>');
+                    escaped = escaped.replace(/^&gt;&gt; (.*)$/gm, '<blockquote class="tg-quote level-2">$1</blockquote>');
+                    escaped = escaped.replace(/^&gt; (.*)$/gm, '<blockquote class="tg-quote level-1">$1</blockquote>');
+                    escaped = escaped.replace(/(?<!>|href=")@(\w+)(?!<)/g, '<span class="tg-mention" data-mention="@$1" title="@$1 в Telegram">@$1</span>');
+                    escaped = escaped.replace(/(?<!>|href=")#(\w+)(?!<)/g, '<span class="tg-hashtag" data-hashtag="#$1">#$1</span>');
+                    const lines = escaped.split('\n');
+                    for (let i = 0; i < lines.length; i++) {
+                        if (i < lines.length - 1 && !lines[i].match(/<[^>]+>$/)) {
+                            lines[i] += '<br>';
+                        }
+                    }
+                    return lines.join('');
+                }
+            };
+
+            const API = {
+                async fetchChannelInfo(channelId) {
+                    try {
+                        const response = await fetch(`${CONFIG.API_BASE}/api/channel/info?channel_id=${channelId}`);
+                        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                        return await response.json();
+                    } catch (err) {
+                        return null;
+                    }
+                },
+                async fetchMessages(channelId, offset = 0, limit = CONFIG.INITIAL_LIMIT) {
+                    try {
+                        const response = await fetch(`${CONFIG.API_BASE}/api/channel/posts?channel_id=${channelId}&offset=${offset}&limit=${limit}`);
+                        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                        const data = await response.json();
+                        return {
+                            messages: data.posts || [],
+                            hasMore: (data.posts || []).length === limit
+                        };
+                    } catch (err) {
+                        return { messages: [], hasMore: false };
+                    }
+                },
+                async fetchMedia(messageId, channelId = null) {
+                    if (!Security.validateMessageId(messageId)) return null;
+                    if (State.mediaErrorCache.has(messageId)) return null;
+                    if (State.mediaCache.has(messageId)) return State.mediaCache.get(messageId);
+                    if (State.mediaPollingQueue.has(messageId)) {
+                        const { attempts } = State.mediaPollingQueue.get(messageId);
+                        if (attempts >= CONFIG.MAX_MEDIA_POLL_ATTEMPTS) {
+                            State.mediaErrorCache.add(messageId);
+                            State.mediaPollingQueue.delete(messageId);
+                            return null;
+                        }
+                    }
+                    try {
+                        let url = `${CONFIG.API_BASE}/api/media/by-message/${messageId}`;
+                        if (channelId) url += `?channel_id=${channelId}`;
+                        const response = await fetch(url);
+                        if (!response.ok) {
+                            if (response.status === 404) return null;
+                            throw new Error(`HTTP ${response.status}`);
+                        }
+                        const data = await response.json();
+                        if (data && data.url) {
+                            State.mediaCache.set(messageId, data);
+                            if (State.mediaPollingQueue.has(messageId)) {
+                                const { timeoutId } = State.mediaPollingQueue.get(messageId);
+                                if (timeoutId) clearTimeout(timeoutId);
+                                State.mediaPollingQueue.delete(messageId);
+                            }
+                            return data;
+                        }
+                    } catch (err) {}
+                    return null;
+                },
+                pollMedia(messageId, channelId, callback, maxAttempts = CONFIG.MAX_MEDIA_POLL_ATTEMPTS) {
+                    if (State.mediaPollingQueue.has(messageId) || State.mediaErrorCache.has(messageId)) return;
+                    const poll = (attempt) => {
+                        if (attempt > maxAttempts) {
+                            if (State.mediaPollingQueue.has(messageId)) {
+                                const { timeoutId } = State.mediaPollingQueue.get(messageId);
+                                if (timeoutId) clearTimeout(timeoutId);
+                                State.mediaPollingQueue.delete(messageId);
+                            }
+                            State.mediaErrorCache.add(messageId);
+                            callback(null, true);
+                            return;
+                        }
+                        API.fetchMedia(messageId, channelId).then(mediaInfo => {
+                            if (mediaInfo && mediaInfo.url) {
+                                State.mediaCache.set(messageId, mediaInfo);
+                                if (State.mediaPollingQueue.has(messageId)) {
+                                    const { timeoutId } = State.mediaPollingQueue.get(messageId);
+                                    if (timeoutId) clearTimeout(timeoutId);
+                                    State.mediaPollingQueue.delete(messageId);
+                                }
+                                callback(mediaInfo.url, false);
+                            } else {
+                                if (State.mediaPollingQueue.has(messageId)) {
+                                    const { timeoutId } = State.mediaPollingQueue.get(messageId);
+                                    if (timeoutId) clearTimeout(timeoutId);
+                                }
+                                const timeoutId = setTimeout(() => poll(attempt + 1), CONFIG.MEDIA_POLL_INTERVAL);
+                                State.mediaPollingQueue.set(messageId, { attempts: attempt, timeoutId, channelId });
+                            }
+                        }).catch(() => {
+                            const timeoutId = setTimeout(() => poll(attempt + 1), CONFIG.MEDIA_POLL_INTERVAL);
+                            State.mediaPollingQueue.set(messageId, { attempts: attempt, timeoutId, channelId });
+                        });
+                    };
+                    poll(1);
+                },
+                cancelMediaPoll(messageId) {
+                    if (State.mediaPollingQueue.has(messageId)) {
+                        const { timeoutId } = State.mediaPollingQueue.get(messageId);
+                        if (timeoutId) clearTimeout(timeoutId);
+                        State.mediaPollingQueue.delete(messageId);
+                    }
+                },
+                cancelAllMediaPollForChannel(channelId) {
+                    State.mediaPollingQueue.forEach((data, messageId) => {
+                        if (data.channelId === channelId) {
+                            if (data.timeoutId) clearTimeout(data.timeoutId);
+                            State.mediaPollingQueue.delete(messageId);
+                        }
+                    });
+                }
+            };
+
+            const UI = {
+                updateChannelInfo(info) {
+                    if (!info) return;
+                    document.getElementById('channelTitle').textContent = info.title || 'Unknown Channel';
+                    document.getElementById('channelUsername').textContent = info.username || '@channel';
+                    if (State.currentChannelId && State.channels.has(State.currentChannelId)) {
+                        const channel = State.channels.get(State.currentChannelId);
+                        channel.title = info.title || channel.title;
+                        channel.username = info.username || channel.username;
+                        State.channels.set(State.currentChannelId, channel);
+                    }
+                },
+                updateConnectionStatus(connected) {
+                    const dot = document.getElementById('statusDot');
+                    dot.classList.toggle('offline', !connected);
+                },
+                updateNewPostsBadge() {
+                    if (!State.currentChannelId) return;
+                    const badge = document.getElementById('newPostsBadge');
+                    const countSpan = document.getElementById('newPostsCount');
+                    const newPosts = State.newPostsByChannel.get(State.currentChannelId) || [];
+                    if (newPosts.length > 0) {
+                        countSpan.textContent = newPosts.length;
+                        badge.classList.remove('hidden');
+                    } else {
+                        badge.classList.add('hidden');
+                    }
+                    renderChannelSelector();
+                },
+                showSkeletonLoaders() {
+                    const feed = document.getElementById('feed');
+                    feed.innerHTML = '';
+                    for (let i = 0; i < CONFIG.SKELETON_COUNT; i++) {
+                        const skeleton = document.createElement('div');
+                        skeleton.className = 'skeleton';
+                        feed.appendChild(skeleton);
+                    }
+                },
+                cacheChannelDOM(channelId) {
+                    const posts = document.querySelectorAll(`.post[data-channel-id="${channelId}"]`);
+                    if (posts.length === 0) return;
+                    const fragment = document.createDocumentFragment();
+                    posts.forEach(post => {
+                        fragment.appendChild(post.cloneNode(true));
+                    });
+                    State.domCache.set(channelId, fragment);
+                },
+                restoreChannelDOM(channelId) {
+                    const cached = State.domCache.get(channelId);
+                    if (!cached) return false;
+                    const feed = document.getElementById('feed');
+                    feed.innerHTML = '';
+                    feed.appendChild(cached.cloneNode(true));
+                    feed.querySelectorAll('.post').forEach(post => {
+                        const originalPost = State.postsByChannel.get(channelId)?.get(Number(post.dataset.messageId));
+                        if (originalPost) {
+                            post.dataset.mediaUrl = originalPost.media_url || '';
+                            post.dataset.mediaType = originalPost.media_type || '';
+                        }
+                        requestAnimationFrame(() => {
+                            post.classList.add('visible');
+                        });
+                    });
+                    return true;
+                },
+                trimOldPosts(channelId) {
+                    const posts = document.querySelectorAll(`.post[data-channel-id="${channelId}"]`);
+                    if (posts.length > CONFIG.MAX_VISIBLE_POSTS) {
+                        const toRemove = Array.from(posts).slice(0, posts.length - CONFIG.MAX_VISIBLE_POSTS);
+                        toRemove.forEach(el => el.remove());
+                    }
+                },
+                createPostElement(post) {
+                    const postEl = document.createElement('div');
+                    postEl.className = 'post';
+                    postEl.dataset.messageId = post.message_id;
+                    postEl.dataset.channelId = post.channel_id;
+                    postEl.dataset.mediaUrl = post.media_url || '';
+                    postEl.dataset.mediaType = post.media_type || '';
+
+                    const channelInfo = State.channels.get(post.channel_id) || {
+                        title: 'Unknown Channel',
+                        username: 'unknown'
+                    };
+
+                    const date = Formatters.formatDate(post.date);
+                    const views = Formatters.formatViews(post.views);
+                    const text = Formatters.formatText(post.text);
+
+                    let mediaHTML = '';
+                    if (post.media_url) {
+                        mediaHTML = this.renderMedia(post.media_url, post.media_type);
+                    } else if (post.has_media) {
+                        mediaHTML = post.media_unavailable
+                            ? '<div class="media-unavailable">📷 Медиа недоступно</div>'
+                            : '<div class="media-loading">📷 Загрузка медиа...</div>';
+                    }
+
+                    postEl.innerHTML = `
+                        <div class="post-content">
+                            <div class="post-header">
+                                <div class="post-avatar" style="color: white; display: flex; align-items: center; justify-content: center; overflow: hidden;">
+                                    <img src="nekhebet.svg" style="width:36px; height:36px; object-fit:cover;" alt="Channel avatar" loading="lazy" decoding="async">
+                                </div>
+                                <div class="post-author-info">
+                                    <div class="post-author-name">
+                                        ${channelInfo.title}
+                                        <span style="font-size: 11px; color: var(--text-secondary);">@${channelInfo.username}</span>
+                                    </div>
+                                    <div class="post-date">
+                                        ${date}
+                                        ${post.is_edited ? '<span class="edited-mark">(ред.)</span>' : ''}
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="post-text">${text || '<i></i>'}</div>
+                            ${mediaHTML}
+                        </div>
+                        <div class="post-footer">
+                            <span class="views-count">👁 ${views}</span>
+                        </div>
+                    `;
+
+                    return postEl;
+                },
+                renderMedia(url, type) {
+                    if (!url) return '';
+                    const fullUrl = url.startsWith('http') ? url : `${CONFIG.API_BASE}${url}`;
+                    let isVideo = false;
+                    if (type) {
+                        const typeStr = String(type).toLowerCase();
+                        isVideo = typeStr.includes('video') || 
+                                  typeStr.includes('document') || 
+                                  typeStr.includes('animation') || 
+                                  typeStr === 'messagemediadocument' || 
+                                  typeStr.includes('gif') || 
+                                  typeStr.includes('mp4');
+                    } else if (fullUrl.match(/\.(mp4|webm|mov|gif)$/i)) {
+                        isVideo = true;
+                    }
+                    if (isVideo) {
+                        return `
+                            <div class="media-container">
+                                <video 
+                                    src="${fullUrl}" 
+                                    controls 
+                                    preload="metadata" 
+                                    playsinline
+                                    style="max-width:100%; max-height:500px; background:#000;">
+                                    Ваш браузер не поддерживает видео.
+                                </video>
+                            </div>
+                        `;
+                    } else {
+                        return `
+                            <div class="media-container">
+                                <img
+                                    src="${fullUrl}"
+                                    alt="Media"
+                                    loading="lazy"
+                                    decoding="async"
+                                    onerror="this.onerror=null; this.parentElement.innerHTML='<div class=\\'media-error\\'>📷 Ошибка загрузки изображения</div>';"
+                                >
+                            </div>
+                        `;
+                    }
+                },
+                renderPosts(posts, channelId) {
+                    const feed = document.getElementById('feed');
+                    const fragment = document.createDocumentFragment();
+                    posts.forEach(post => {
+                        const postEl = this.createPostElement(post);
+                        fragment.appendChild(postEl);
+                    });
+                    feed.appendChild(fragment);
+                    feed.querySelectorAll('.post').forEach(post => {
+                        requestAnimationFrame(() => {
+                            post.classList.add('visible');
+                        });
+                    });
+                    this.trimOldPosts(channelId);
+                },
+                addPostToTop(post) {
+                    const feed = document.getElementById('feed');
+                    const postEl = this.createPostElement(post);
+
+                    if (feed.firstChild) {
+                        feed.insertBefore(postEl, feed.firstChild);
+                    } else {
+                        feed.appendChild(postEl);
+                    }
+
+                    requestAnimationFrame(() => {
+                        postEl.classList.add('visible', 'new');
+                    });
+
+                    setTimeout(() => {
+                        postEl.classList.remove('new');
+                    }, 3000);
+                },
+                updatePost(messageId, data) {
+                    const postEl = document.querySelector(`.post[data-message-id="${messageId}"]`);
+                    if (!postEl) return false;
+                    let changed = false;
+                    if (data.text !== undefined) {
+                        const textEl = postEl.querySelector('.post-text');
+                        if (textEl) {
+                            textEl.innerHTML = Formatters.formatText(data.text || '');
+                            changed = true;
+                        }
+                    }
+                    if (data.edit_date) {
+                        const dateEl = postEl.querySelector('.post-date');
+                        if (dateEl) {
+                            dateEl.innerHTML = Formatters.formatDate(data.edit_date);
+                            if (!dateEl.innerHTML.includes('(ред.)')) {
+                                dateEl.innerHTML += ' <span class="edited-mark">(ред.)</span>';
+                            }
+                            changed = true;
+                        }
+                    }
+                    if (data.media_url) {
+                        const mediaContainer = postEl.querySelector('.media-container, .media-loading, .media-unavailable');
+                        if (mediaContainer) {
+                            const newMedia = this.renderMedia(data.media_url, data.media_type);
+                            if (newMedia) {
+                                mediaContainer.outerHTML = newMedia;
+                                postEl.dataset.mediaUrl = data.media_url;
+                                postEl.dataset.mediaType = data.media_type || '';
+                                changed = true;
+                            }
+                        }
+                    }
+                    if (changed) {
+                        postEl.classList.add('updated');
+                        setTimeout(() => postEl.classList.remove('updated'), 2000);
+                    }
+                    return changed;
+                },
+                updatePostMediaUnavailable(messageId) {
+                    const postEl = document.querySelector(`.post[data-message-id="${messageId}"]`);
+                    if (!postEl) return false;
+                    const mediaContainer = postEl.querySelector('.media-loading');
+                    if (mediaContainer) {
+                        mediaContainer.outerHTML = '<div class="media-unavailable">📷 Медиа недоступно</div>';
+                        const channelId = Number(postEl.dataset.channelId);
+                        if (channelId && State.postsByChannel.has(channelId)) {
+                            const post = State.postsByChannel.get(channelId).get(Number(messageId));
+                            if (post) post.media_unavailable = true;
+                        }
+                        return true;
+                    }
+                    return false;
+                },
+                deletePost(messageId) {
+                    const postEl = document.querySelector(`.post[data-message-id="${messageId}"]`);
+                    if (!postEl) return false;
+                    postEl.classList.add('deleted');
+                    setTimeout(() => {
+                        postEl.remove();
+                        const channelId = Number(postEl.dataset.channelId);
+                        if (channelId && State.postsByChannel.has(channelId)) {
+                            State.postsByChannel.get(channelId).delete(messageId);
+                            const order = State.postOrderByChannel.get(channelId) || [];
+                            const index = order.indexOf(Number(messageId));
+                            if (index !== -1) order.splice(index, 1);
+                        }
+                        API.cancelMediaPoll(messageId);
+                    }, 300);
+                    return true;
+                },
+                setLoaderVisible(visible) {
+                    const trigger = document.getElementById('infiniteScrollTrigger');
+                    if (trigger) trigger.textContent = visible ? 'Загрузка...' : '↓ Загрузить ещё';
+                },
+                showScrollTopButton(visible) {
+                    const btn = document.getElementById('scrollTopBtn');
+                    if (btn) btn.style.display = visible ? 'flex' : 'none';
+                }
+            };
+
+            const Lightbox = {
+                open(url, type) {
+                    if (!url) return;
+                    const lightbox = document.getElementById('lightbox');
+                    const content = document.getElementById('lightboxContent');
+                    const fullUrl = url.startsWith('http') ? url : `${CONFIG.API_BASE}${url}`;
+                    const isVideo = type === 'video' || type === 'Video' || url.match(/\.(mp4|webm|mov)$/i);
+                    content.innerHTML = isVideo
+                        ? `<video src="${fullUrl}" controls autoplay playsinline></video>`
+                        : `<img src="${fullUrl}" alt="Media">`;
+                    lightbox.classList.add('active');
+                    document.body.style.overflow = 'hidden';
+                },
+                close() {
+                    const lightbox = document.getElementById('lightbox');
+                    lightbox.classList.remove('active');
+                    document.getElementById('lightboxContent').innerHTML = '';
+                    document.body.style.overflow = '';
+                }
+            };
+
+            const MessageLoader = {
+                async loadChannelMessages(channelId, reset = false) {
+                    if (State.isLoading) return;
+                    const hasMore = State.hasMoreByChannel.get(channelId) ?? true;
+                    if (reset) {
+                        State.resetChannel(channelId);
+                        document.getElementById('feed').innerHTML = '';
+                    }
+                    if (!hasMore) {
+                        document.getElementById('infiniteScrollTrigger').style.display = 'none';
+                        return;
+                    }
+                    State.isLoading = true;
+                    UI.setLoaderVisible(true);
+                    try {
+                        const offset = State.offsetByChannel.get(channelId) || 0;
+                        const data = await API.fetchMessages(channelId, offset, CONFIG.INITIAL_LIMIT);
+                        if (data.messages && data.messages.length > 0) {
+                            State.hasMoreByChannel.set(channelId, data.hasMore !== false);
+                            State.offsetByChannel.set(channelId, offset + data.messages.length);
+                            const channelPosts = State.postsByChannel.get(channelId) || new Map();
+                            const channelOrder = State.postOrderByChannel.get(channelId) || [];
+                            data.messages.forEach(post => {
+                                post.channel_id = channelId;
+                                if (!channelPosts.has(post.message_id)) {
+                                    channelPosts.set(post.message_id, post);
+                                    channelOrder.push(post.message_id);
+                                }
+                            });
+                            State.postsByChannel.set(channelId, channelPosts);
+                            State.postOrderByChannel.set(channelId, channelOrder);
+                            if (channelId === State.currentChannelId) {
+                                UI.renderPosts(data.messages, channelId);
+                            }
+                            data.messages.forEach(post => {
+                                if (post.has_media) {
+                                    API.fetchMedia(post.message_id, channelId).then(mediaInfo => {
+                                        if (mediaInfo && mediaInfo.url) {
+                                            post.media_url = mediaInfo.url;
+                                            post.media_type = mediaInfo.file_type || post.media_type;
+                                            if (channelId === State.currentChannelId) {
+                                                UI.updatePost(post.message_id, {
+                                                    media_url: mediaInfo.url,
+                                                    media_type: post.media_type
+                                                });
+                                            }
+                                        } else {
+                                            API.pollMedia(post.message_id, channelId, (url, failed) => {
+                                                if (url) {
+                                                    post.media_url = url;
+                                                    if (channelId === State.currentChannelId) {
+                                                        UI.updatePost(post.message_id, { media_url: url });
+                                                    }
+                                                } else if (failed && channelId === State.currentChannelId) {
+                                                    UI.updatePostMediaUnavailable(post.message_id);
+                                                }
+                                            });
+                                        }
+                                    });
+                                }
+                            });
+                        } else {
+                            State.hasMoreByChannel.set(channelId, false);
+                        }
+                    } catch (err) {
+                    } finally {
+                        State.isLoading = false;
+                        UI.setLoaderVisible(false);
+                    }
+                },
+                async loadInitial() {
+                    if (State.channels.size === 0) return;
+                    if (State.currentChannelId) {
+                        await loadChannelInfo(State.currentChannelId);
+                        await this.loadChannelMessages(State.currentChannelId, true);
+                    }
+                }
+            };
+
+            async function loadChannelInfo(channelId) {
+                try {
+                    const info = await API.fetchChannelInfo(channelId);
+                    if (info) UI.updateChannelInfo(info);
+                } catch (err) {}
+            }
+
+            const WebSocketManager = {
+                connect() {
+                    try {
+                        State.ws = new WebSocket(CONFIG.WS_BASE);
+                        State.ws.onopen = () => {
+                            State.wsConnected = true;
+                            State.wsReconnectAttempts = 0;
+                            UI.updateConnectionStatus(true);
+                            setInterval(() => {
+                                if (State.ws && State.ws.readyState === WebSocket.OPEN) {
+                                    State.ws.send(JSON.stringify({ type: 'ping' }));
+                                }
+                            }, 30000);
+                        };
+                        State.ws.onmessage = (event) => {
+                            try {
+                                const data = JSON.parse(event.data);
+                                if (['ping', 'pong', 'welcome', 'heartbeat', 'buffering', 'flush_start', 'flush_complete'].includes(data.type)) {
+                                    return;
+                                }
+                                switch (data.type) {
+                                    case 'new': this.handleNewMessage(data); break;
+                                    case 'edit': this.handleEditMessage(data); break;
+                                    case 'delete': this.handleDeleteMessage(data); break;
+                                }
+                            } catch (err) {}
+                        };
+                        State.ws.onclose = () => {
+                            State.wsConnected = false;
+                            UI.updateConnectionStatus(false);
+                            this.reconnect();
+                        };
+                        State.ws.onerror = () => {};
+                    } catch (err) {
+                        this.reconnect();
+                    }
+                },
+                reconnect() {
+                    if (State.wsReconnectAttempts >= CONFIG.MAX_RECONNECT_ATTEMPTS) return;
+                    State.wsReconnectAttempts++;
+                    const delay = Math.min(CONFIG.RECONNECT_BASE_DELAY * Math.pow(2, State.wsReconnectAttempts), 30000);
+                    setTimeout(() => {
+                        if (!State.wsConnected) this.connect();
+                    }, delay);
+                },
+                handleNewMessage(data) {
+                    const channelId = data.channel_id || State.currentChannelId;
+                    if (!channelId || !State.channels.has(channelId)) return;
+                    const messageKey = `${channelId}-${data.message_id}`;
+                    const lastReceived = State.recentMessages.get(messageKey);
+                    if (lastReceived && (Date.now() - lastReceived < CONFIG.DEDUP_TTL)) return;
+                    State.recentMessages.set(messageKey, Date.now());
+                    if (State.recentMessages.size > 100) {
+                        const now = Date.now();
+                        for (const [key, time] of State.recentMessages.entries()) {
+                            if (now - time > CONFIG.DEDUP_TTL) State.recentMessages.delete(key);
+                        }
+                    }
+                    const channelPosts = State.postsByChannel.get(channelId) || new Map();
+                    if (channelPosts.has(data.message_id)) return;
+                    const hasMedia = !!(data.media_type || data.media_url || data.has_media);
+                    let mediaType = data.media_type || null;
+                    if (!mediaType && data.media_url) {
+                        mediaType = data.media_url.match(/\.(mp4|webm|mov)$/i) ? 'video' : 'photo';
+                    }
+                    const post = {
+                        message_id: data.message_id,
+                        channel_id: channelId,
+                        text: data.text || '',
+                        date: data.date || new Date().toISOString(),
+                        views: data.views || 0,
+                        has_media: hasMedia,
+                        media_type: mediaType,
+                        media_url: data.media_url,
+                        is_edited: false
+                    };
+                    const newPosts = State.newPostsByChannel.get(channelId) || [];
+                    newPosts.push(post);
+                    State.newPostsByChannel.set(channelId, newPosts);
+                    if (channelId === State.currentChannelId) {
+                        UI.updateNewPostsBadge();
+                        if (window.scrollY < 200) this.flushNewPostsForChannel(channelId);
+                    } else {
+                        renderChannelSelector();
+                    }
+                    if (hasMedia) this.handleMediaForMessage(post, data, channelId);
+                },
+                handleMediaForMessage(post, data, channelId) {
+                    if (data.media_type) {
+                        post.media_type = data.media_type;
+                    }
+                    if (data.media_url) {
+                        post.media_url = data.media_url;
+                        if (channelId === State.currentChannelId) {
+                            const existingPost = document.querySelector(`.post[data-message-id="${data.message_id}"]`);
+                            if (existingPost) UI.updatePost(data.message_id, {
+                                media_url: data.media_url,
+                                media_type: data.media_type || post.media_type
+                            });
+                        }
+                    } else {
+                        API.fetchMedia(data.message_id, channelId).then(mediaInfo => {
+                            if (mediaInfo && mediaInfo.url) {
+                                post.media_url = mediaInfo.url;
+                                post.media_type = mediaInfo.file_type || post.media_type;
+                                if (channelId === State.currentChannelId) {
+                                    const existingPost = document.querySelector(`.post[data-message-id="${data.message_id}"]`);
+                                    if (existingPost) UI.updatePost(data.message_id, {
+                                        media_url: mediaInfo.url,
+                                        media_type: post.media_type
+                                    });
+                                }
+                            } else {
+                                API.pollMedia(data.message_id, channelId, (url, failed) => {
+                                    if (url) {
+                                        post.media_url = url;
+                                        if (channelId === State.currentChannelId) {
+                                            const existingPost = document.querySelector(`.post[data-message-id="${data.message_id}"]`);
+                                            if (existingPost) UI.updatePost(data.message_id, {
+                                                media_url: url,
+                                                media_type: post.media_type
+                                            });
+                                        }
+                                    } else if (failed && channelId === State.currentChannelId) {
+                                        const existingPost = document.querySelector(`.post[data-message-id="${data.message_id}"]`);
+                                        if (existingPost) UI.updatePostMediaUnavailable(data.message_id);
+                                    }
+                                });
+                            }
+                        }).catch(() => {
+                            API.pollMedia(data.message_id, channelId, (url, failed) => {
+                                if (url) {
+                                    post.media_url = url;
+                                    if (channelId === State.currentChannelId) {
+                                        const existingPost = document.querySelector(`.post[data-message-id="${data.message_id}"]`);
+                                        if (existingPost) UI.updatePost(data.message_id, {
+                                            media_url: url,
+                                            media_type: post.media_type
+                                        });
+                                    }
+                                }
+                            });
+                        });
+                    }
+                },
+                handleEditMessage(data) {
+                    const channelId = data.channel_id;
+                    if (!channelId || !State.channels.has(channelId)) return;
+                    const channelPosts = State.postsByChannel.get(channelId);
+                    if (channelPosts && channelPosts.has(data.message_id)) {
+                        const post = channelPosts.get(data.message_id);
+                        if (data.text !== undefined) post.text = data.text;
+                        if (data.media_url) post.media_url = data.media_url;
+                        if (data.media_type) post.media_type = data.media_type;
+                        post.is_edited = true;
+                        post.edit_date = data.edit_date;
+                        channelPosts.set(data.message_id, post);
+                    }
+                    UI.updatePost(data.message_id, {
+                        text: data.text,
+                        edit_date: data.edit_date,
+                        media_url: data.media_url,
+                        media_type: data.media_type
+                    });
+                },
+                handleDeleteMessage(data) {
+                    const channelId = data.channel_id;
+                    if (!channelId || !State.channels.has(channelId)) return;
+                    const channelPosts = State.postsByChannel.get(channelId);
+                    if (channelPosts) channelPosts.delete(data.message_id);
+                    const channelOrder = State.postOrderByChannel.get(channelId);
+                    if (channelOrder) {
+                        const index = channelOrder.indexOf(data.message_id);
+                        if (index !== -1) channelOrder.splice(index, 1);
+                    }
+                    UI.deletePost(data.message_id);
+                    API.cancelMediaPoll(data.message_id);
+                },
+                flushNewPostsForChannel(channelId) {
+                    if (!channelId) return;
+                    const newPosts = State.newPostsByChannel.get(channelId) || [];
+                    if (newPosts.length === 0) return;
+                    const channelPosts = State.postsByChannel.get(channelId) || new Map();
+                    const channelOrder = State.postOrderByChannel.get(channelId) || [];
+                    while (newPosts.length > 0) {
+                        const post = newPosts.shift();
+                        if (channelId === State.currentChannelId) UI.addPostToTop(post);
+                        channelPosts.set(post.message_id, post);
+                        channelOrder.unshift(post.message_id);
+                    }
+                    State.postsByChannel.set(channelId, channelPosts);
+                    State.postOrderByChannel.set(channelId, channelOrder);
+                    State.newPostsByChannel.set(channelId, []);
+                    if (channelId === State.currentChannelId) {
+                        UI.updateNewPostsBadge();
+                    } else {
+                        renderChannelSelector();
+                    }
+                }
+            };
+
+            const ScrollHandler = {
+                init() {
+                    State.lastDocumentHeight = document.documentElement.scrollHeight;
+                    const resizeObserver = new ResizeObserver(() => {
+                        State.lastDocumentHeight = document.documentElement.scrollHeight;
+                    });
+                    resizeObserver.observe(document.documentElement);
+                    window.addEventListener('scroll', this.throttledHandle.bind(this), { passive: true });
+                },
+                handle() {
+                    UI.showScrollTopButton(window.scrollY > 500);
+                    if (window.scrollY + window.innerHeight >= State.lastDocumentHeight - 500) {
+                        if (!State.isLoading && State.currentChannelId) {
+                            const hasMore = State.hasMoreByChannel.get(State.currentChannelId) ?? true;
+                            if (hasMore) MessageLoader.loadChannelMessages(State.currentChannelId);
+                        }
+                    }
+                    if (window.scrollY < 200 && State.currentChannelId) {
+                        const newPosts = State.newPostsByChannel.get(State.currentChannelId) || [];
+                        if (newPosts.length > 0) WebSocketManager.flushNewPostsForChannel(State.currentChannelId);
+                    }
+                },
+                throttledHandle() {
+                    if (State.scrollTimeout) cancelAnimationFrame(State.scrollTimeout);
+                    State.scrollTimeout = requestAnimationFrame(() => {
+                        this.handle();
+                        State.scrollTimeout = null;
+                    });
+                }
+            };
+
+            async function init() {
+                ThemeManager.init();
+                await loadChannelConfig();
+                renderChannelSelector();
+                await MessageLoader.loadInitial();
+                WebSocketManager.connect();
+                ScrollHandler.init();
+
+                document.getElementById('feed').addEventListener('click', (e) => {
+                    const container = e.target.closest('.media-container');
+                    if (container) {
+                        const post = container.closest('.post');
+                        if (post && post.dataset.mediaUrl) {
+                            Lightbox.open(post.dataset.mediaUrl, post.dataset.mediaType);
+                        }
+                    }
+                });
+
+                document.getElementById('channelAvatar').addEventListener('click', () => ThemeManager.toggle());
+                document.getElementById('newPostsBadge').addEventListener('click', () => {
+                    window.scrollTo({ top: 0, behavior: 'smooth' });
+                    if (State.currentChannelId) WebSocketManager.flushNewPostsForChannel(State.currentChannelId);
+                });
+                document.getElementById('scrollTopBtn').addEventListener('click', () => {
+                    window.scrollTo({ top: 0, behavior: 'smooth' });
+                });
+                document.getElementById('lightboxClose').addEventListener('click', Lightbox.close);
+                document.getElementById('lightbox').addEventListener('click', (e) => {
+                    if (e.target === document.getElementById('lightbox')) Lightbox.close();
+                });
+                document.addEventListener('visibilitychange', () => {
+                    if (!document.hidden && State.currentChannelId) {
+                        const newPosts = State.newPostsByChannel.get(State.currentChannelId) || [];
+                        if (newPosts.length > 0) WebSocketManager.flushNewPostsForChannel(State.currentChannelId);
+                    }
+                });
+            }
+
+            if (document.readyState === 'loading') {
+                document.addEventListener('DOMContentLoaded', init);
+            } else {
+                init();
+            }
+        })();
+    </script>
+</body>
+</html>
