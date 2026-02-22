@@ -1,0 +1,26 @@
+{
+  "channels": [
+    {
+      "id": 1394050290,
+      "slug": "LabaLabubu",
+      "title": "Лаба Лабубу",
+      "username": "LabaLabubu",
+      "category": "RU/science",
+      "description": "Научно-популярный канал",
+      "avatar": "🧪",
+      "mirror_url": "https://labubugram.github.io/channels/RU/science/LabaLabubu/",
+      "api_base": "https://0808.us.nekhebet.su:8081"
+    },
+    {
+      "id": 1234567890,
+      "slug": "medvedev",
+      "title": "Medvedev Channel",
+      "username": "medvedev_telegram",
+      "category": "RU/politics",
+      "description": "Канал Дмитрия Медведева",
+      "avatar": "🇷🇺",
+      "mirror_url": "https://labubugram.github.io/channels/RU/politics/medvedev/",
+      "api_base": "https://0808.us.nekhebet.su:8081"
+    }
+  ]
+}
