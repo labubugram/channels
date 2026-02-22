@@ -1,1 +1,63 @@
 
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="mirror:api-base" content="{{API_BASE}}">
+    <meta name="mirror:channel-id" content="{{CHANNEL_ID}}">
+    <meta name="mirror:channel-title" content="{{CHANNEL_TITLE}}">
+    <meta name="mirror:channel-username" content="{{CHANNEL_USERNAME}}">
+    <meta name="mirror:channel-avatar" content="{{CHANNEL_AVATAR}}">
+    <title>{{CHANNEL_TITLE}} · Telegram Mirror</title>
+    <link rel="stylesheet" href="/core/core.css">
+    <base href="{{BASE_URL}}">
+</head>
+<body>
+    <div id="app">
+        <!-- Telegram-like header -->
+        <div class="tg-header">
+            <div class="channel-profile">
+                <div class="channel-avatar" id="channelAvatar">{{CHANNEL_AVATAR}}</div>
+                <div class="channel-info">
+                    <div class="channel-title-row">
+                        <span class="channel-title" id="channelTitle">{{CHANNEL_TITLE}}</span>
+                        <span class="status-dot" id="statusDot"></span>
+                    </div>
+                    <div class="channel-meta">
+                        <span id="channelUsername">@{{CHANNEL_USERNAME}}</span>
+                    </div>
+                </div>
+                <div class="new-posts-badge hidden" id="newPostsBadge">
+                    <span class="new-dot"></span>
+                    <span id="newPostsCount">0</span> новых
+                </div>
+            </div>
+        </div>
+
+        <!-- Messages feed -->
+        <div class="feed" id="feed"></div>
+
+        <!-- Infinite scroll trigger -->
+        <div id="infiniteScrollTrigger" class="infinite-scroll-trigger">
+            ↓ Загрузить ещё
+        </div>
+
+        <!-- Scroll to top button -->
+        <button class="scroll-top" id="scrollTopBtn" title="Наверх">
+            ↑
+        </button>
+
+        <!-- Lightbox for media -->
+        <div class="lightbox" id="lightbox">
+            <button class="lightbox-close" id="lightboxClose">✕</button>
+            <div class="lightbox-content" id="lightboxContent"></div>
+        </div>
+
+        <!-- Toast container -->
+        <div id="toastContainer"></div>
+    </div>
+
+    <script src="/core/core.js"></script>
+</body>
+</html>
