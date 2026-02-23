@@ -385,7 +385,7 @@
                 }
             });
 
-            this.bottomSpacer.insertAdjacentElement('beforebegin', fragment);
+            this.feed.insertBefore(fragment, this.bottomSpacer);
 
             this.feed.querySelectorAll('.post').forEach(el => {
                 if (this.observer) this.observer.observe(el);
