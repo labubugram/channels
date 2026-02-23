@@ -12,16 +12,13 @@
         RECONNECT_BASE_DELAY: 1000,
         MEDIA_POLL_INTERVAL: 5000,
         MAX_MEDIA_POLL_ATTEMPTS: 12,
-        MAX_VISIBLE_POSTS: 100,
-        LAZY_LOAD_OFFSET: 500,
+        ESTIMATED_ITEM_HEIGHT: 200,
+        OVERSCAN: 5,
         DEDUP_TTL: 5000,
         WS_BASE: (() => {
             const apiBase = document.querySelector('meta[name="mirror:api-base"]')?.content || 'https://0808.us.nekhebet.su:8081';
             return apiBase.replace('http://', 'ws://').replace('https://', 'wss://');
-        })(),
-        VIRTUAL_OVERSCAN: 5,
-        POST_HEIGHT_ESTIMATE: 400,
-        SCROLL_THRESHOLD: 500
+        })()
     };
 
     const State = {
@@ -38,16 +35,13 @@
         mediaErrorCache: new Set(),
         mediaPollingQueue: new Map(),
         recentMessages: new Map(),
-        lastDocumentHeight: 0,
         theme: localStorage.getItem('theme') || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'),
         isTransitioning: false,
         pendingTheme: null,
         wsMessageQueue: [],
         wsProcessing: false,
-        virtualizer: null,
-        virtualRows: [],
-        totalHeight: 0,
-        isVirtualizing: false
+        itemHeights: new Map(),
+        virtualizer: null
     };
 
     const Security = {
@@ -199,6 +193,14 @@
             if (!Security.validateMessageId(messageId)) return null;
             if (State.mediaErrorCache.has(messageId)) return null;
             if (State.mediaCache.has(messageId)) return State.mediaCache.get(messageId);
+            if (State.mediaPollingQueue.has(messageId)) {
+                const { attempts } = State.mediaPollingQueue.get(messageId);
+                if (attempts >= CONFIG.MAX_MEDIA_POLL_ATTEMPTS) {
+                    State.mediaErrorCache.add(messageId);
+                    State.mediaPollingQueue.delete(messageId);
+                    return null;
+                }
+            }
             try {
                 const response = await fetch(`${CONFIG.API_BASE}/api/media/by-message/${messageId}?channel_id=${CONFIG.CHANNEL_ID}`);
                 if (!response.ok) {
@@ -208,6 +210,11 @@
                 const data = await response.json();
                 if (data && data.url) {
                     State.mediaCache.set(messageId, data);
+                    if (State.mediaPollingQueue.has(messageId)) {
+                        const { timeoutId } = State.mediaPollingQueue.get(messageId);
+                        if (timeoutId) clearTimeout(timeoutId);
+                        State.mediaPollingQueue.delete(messageId);
+                    }
                     return data;
                 }
             } catch (err) {}
@@ -236,6 +243,10 @@
                         }
                         callback(mediaInfo.url, false);
                     } else {
+                        if (State.mediaPollingQueue.has(messageId)) {
+                            const { timeoutId } = State.mediaPollingQueue.get(messageId);
+                            if (timeoutId) clearTimeout(timeoutId);
+                        }
                         const timeoutId = setTimeout(() => poll(attempt + 1), CONFIG.MEDIA_POLL_INTERVAL);
                         State.mediaPollingQueue.set(messageId, { attempts: attempt, timeoutId });
                     }
@@ -252,6 +263,13 @@
                 if (timeoutId) clearTimeout(timeoutId);
                 State.mediaPollingQueue.delete(messageId);
             }
+        },
+        clearMediaCache() {
+            State.mediaCache.clear();
+            State.mediaErrorCache.clear();
+            State.mediaPollingQueue.forEach((_, msgId) => {
+                this.cancelMediaPoll(msgId);
+            });
         }
     };
 
@@ -324,137 +342,186 @@
         }
     };
 
-    const VirtualList = {
-        init(container) {
-            if (!container || !window.Virtualizer) return;
+    const VirtualManager = {
+        container: null,
+        content: null,
+        resizeObserver: null,
+        
+        init(containerSelector, contentSelector) {
+            this.container = document.querySelector(containerSelector);
+            this.content = document.querySelector(contentSelector);
             
-            State.virtualizer = new window.Virtualizer({
-                count: State.postOrder.length,
-                getScrollElement: () => container,
-                estimateSize: () => CONFIG.POST_HEIGHT_ESTIMATE,
-                overscan: CONFIG.VIRTUAL_OVERSCAN
-            });
+            if (!this.container || !this.content) return;
             
-            State.isVirtualizing = true;
-            this.update();
-        },
-        update() {
-            if (!State.virtualizer) return;
+            this.container.style.overflowY = 'auto';
+            this.container.style.height = 'calc(100vh - 180px)';
+            this.container.style.position = 'relative';
+            this.content.style.position = 'relative';
+            this.content.style.width = '100%';
             
-            State.virtualizer.setOptions({
-                count: State.postOrder.length
-            });
-            
-            State.virtualRows = State.virtualizer.getVirtualItems();
-            State.totalHeight = State.virtualizer.getTotalSize();
-            
-            if (State.virtualRows.length > 0) {
-                const startIndex = State.virtualRows[0].index;
-                const endIndex = State.virtualRows[State.virtualRows.length - 1].index;
+            if (typeof VirtualCore !== 'undefined') {
+                State.virtualizer = new VirtualCore({
+                    count: State.postOrder.length,
+                    getScrollElement: () => this.container,
+                    estimateSize: (index) => {
+                        const messageId = State.postOrder[index];
+                        return State.itemHeights.get(messageId) || CONFIG.ESTIMATED_ITEM_HEIGHT;
+                    },
+                    overscan: CONFIG.OVERSCAN
+                });
                 
-                document.querySelectorAll('.virtual-post').forEach(el => {
-                    const index = parseInt(el.dataset.virtualIndex);
-                    if (index < startIndex || index > endIndex) {
-                        if (el.parentNode) el.remove();
-                    }
+                const unsubscribe = State.virtualizer.subscribeTo('range', () => this.render());
+                
+                this.resizeObserver = new ResizeObserver(entries => {
+                    entries.forEach(entry => {
+                        const messageId = Number(entry.target.dataset.messageId);
+                        if (messageId) {
+                            const height = entry.contentRect.height;
+                            State.itemHeights.set(messageId, height);
+                            if (State.virtualizer) {
+                                State.virtualizer.measure();
+                            }
+                        }
+                    });
                 });
             }
         },
-        getVisibleRange() {
-            if (!State.virtualRows.length) return { start: 0, end: 0 };
-            return {
-                start: State.virtualRows[0].index,
-                end: State.virtualRows[State.virtualRows.length - 1].index
-            };
-        },
-        scrollToIndex(index, smooth = false) {
-            if (!State.virtualizer) return;
-            State.virtualizer.scrollToIndex(index, {
-                align: 'start',
-                behavior: smooth ? 'smooth' : 'auto'
+        
+        render() {
+            if (!State.virtualizer || !this.content) return;
+            
+            const { startIndex, endIndex } = State.virtualizer.getRange();
+            const virtualItems = State.virtualizer.getVirtualItems();
+            const fragment = document.createDocumentFragment();
+            
+            for (let i = startIndex; i <= endIndex; i++) {
+                const messageId = State.postOrder[i];
+                const post = State.posts.get(messageId);
+                const virtualItem = virtualItems[i - startIndex];
+                
+                if (!post || !virtualItem) continue;
+                
+                let itemEl = document.querySelector(`.post[data-message-id="${messageId}"]`);
+                
+                if (!itemEl) {
+                    itemEl = UI.createPostElement(post);
+                    itemEl.style.position = 'absolute';
+                    itemEl.style.top = '0';
+                    itemEl.style.left = '0';
+                    itemEl.style.width = '100%';
+                    itemEl.style.transform = `translateY(${virtualItem.start}px)`;
+                    itemEl.dataset.virtualIndex = i;
+                    
+                    if (this.resizeObserver) {
+                        this.resizeObserver.observe(itemEl);
+                    }
+                    
+                    fragment.appendChild(itemEl);
+                } else {
+                    itemEl.style.transform = `translateY(${virtualItem.start}px)`;
+                }
+            }
+            
+            document.querySelectorAll('.post').forEach(el => {
+                const messageId = Number(el.dataset.messageId);
+                const index = State.postOrder.indexOf(messageId);
+                
+                if (index < startIndex || index > endIndex) {
+                    if (this.resizeObserver) {
+                        this.resizeObserver.unobserve(el);
+                    }
+                    el.remove();
+                }
             });
+            
+            if (fragment.children.length > 0) {
+                this.content.appendChild(fragment);
+            }
+            
+            this.content.style.height = `${State.virtualizer.getTotalSize()}px`;
         },
+        
+        scrollToMessage(messageId, behavior = 'smooth') {
+            const index = State.postOrder.indexOf(messageId);
+            if (index !== -1 && State.virtualizer && this.container) {
+                State.virtualizer.scrollToIndex(index, { align: 'start', behavior });
+            }
+        },
+        
+        scrollToTop(behavior = 'smooth') {
+            if (this.container) {
+                this.container.scrollTo({ top: 0, behavior });
+            }
+        },
+        
+        update() {
+            if (State.virtualizer) {
+                State.virtualizer.setOptions({
+                    count: State.postOrder.length,
+                    estimateSize: (index) => {
+                        const messageId = State.postOrder[index];
+                        return State.itemHeights.get(messageId) || CONFIG.ESTIMATED_ITEM_HEIGHT;
+                    }
+                });
+                State.virtualizer.measure();
+                this.render();
+            }
+        },
+        
         destroy() {
-            State.virtualizer = null;
-            State.virtualRows = [];
-            State.totalHeight = 0;
-            State.isVirtualizing = false;
+            if (this.resizeObserver) {
+                this.resizeObserver.disconnect();
+                this.resizeObserver = null;
+            }
+            if (this.content) {
+                this.content.innerHTML = '';
+            }
         }
     };
 
     const UI = {
-        feed: null,
-        virtualContainer: null,
-        postHeights: new Map(),
-        initVirtualization() {
-            this.feed = document.getElementById('feed');
-            if (!this.feed) return;
-            
-            this.feed.style.position = 'relative';
-            this.feed.style.height = '100%';
-            this.feed.style.overflowY = 'auto';
-            
-            this.virtualContainer = document.createElement('div');
-            this.virtualContainer.style.position = 'relative';
-            this.virtualContainer.style.width = '100%';
-            this.virtualContainer.style.height = `${State.totalHeight}px`;
-            
-            this.feed.innerHTML = '';
-            this.feed.appendChild(this.virtualContainer);
-            
-            VirtualList.init(this.feed);
-            
-            this.feed.addEventListener('scroll', () => {
-                if (!State.isVirtualizing) return;
-                VirtualList.update();
-                this.renderVisiblePosts();
-                this.checkInfiniteScroll();
-            });
-        },
-        renderVisiblePosts() {
-            if (!State.isVirtualizing || !this.virtualContainer) return;
-            
-            const { start, end } = VirtualList.getVisibleRange();
-            const fragment = document.createDocumentFragment();
-            const existingPosts = new Map();
-            
-            this.virtualContainer.querySelectorAll('.virtual-post').forEach(el => {
-                const index = parseInt(el.dataset.virtualIndex);
-                existingPosts.set(index, el);
-            });
-            
-            for (let i = start; i <= end; i++) {
-                if (i >= State.postOrder.length) break;
-                
-                if (existingPosts.has(i)) {
-                    existingPosts.delete(i);
-                    continue;
-                }
-                
-                const messageId = State.postOrder[i];
-                const post = State.posts.get(messageId);
-                if (!post) continue;
-                
-                const postEl = this.createVirtualPostElement(post, i);
-                const top = State.virtualRows.find(v => v.index === i)?.start || i * CONFIG.POST_HEIGHT_ESTIMATE;
-                
-                postEl.style.position = 'absolute';
-                postEl.style.top = '0';
-                postEl.style.transform = `translateY(${top}px)`;
-                postEl.style.width = '100%';
-                
-                fragment.appendChild(postEl);
+        updateChannelInfo() {
+            document.getElementById('channelTitle').textContent = CONFIG.CHANNEL_TITLE;
+            document.getElementById('channelUsername').textContent = `@${CONFIG.CHANNEL_USERNAME}`;
+            const avatarEl = document.getElementById('channelAvatar');
+            if (avatarEl) {
+                avatarEl.innerHTML = `<img src="nekhebet.svg" style="width:54px; height:54px; object-fit:cover;" alt="Channel avatar" loading="lazy">`;
             }
-            
-            this.virtualContainer.appendChild(fragment);
-            
-            existingPosts.forEach(el => el.remove());
         },
-        createVirtualPostElement(post, index) {
+        updateConnectionStatus(connected) {
+            const dot = document.getElementById('statusDot');
+            if (dot) {
+                dot.classList.toggle('offline', !connected);
+            }
+        },
+        updateNewPostsBadge() {
+            const badge = document.getElementById('newPostsBadge');
+            const countSpan = document.getElementById('newPostsCount');
+            if (badge && countSpan) {
+                if (State.newPosts.length > 0) {
+                    countSpan.textContent = State.newPosts.length;
+                    badge.classList.remove('hidden');
+                } else {
+                    badge.classList.add('hidden');
+                }
+            }
+        },
+        showSkeletonLoaders() {
+            const container = document.getElementById('virtualContent');
+            if (container) {
+                container.innerHTML = '';
+                for (let i = 0; i < 3; i++) {
+                    const skeleton = document.createElement('div');
+                    skeleton.className = 'skeleton';
+                    skeleton.style.marginBottom = '12px';
+                    container.appendChild(skeleton);
+                }
+            }
+        },
+        createPostElement(post) {
             const postEl = document.createElement('div');
-            postEl.className = 'post virtual-post';
+            postEl.className = 'post';
             postEl.dataset.messageId = post.message_id;
-            postEl.dataset.virtualIndex = index;
             postEl.dataset.mediaUrl = post.media_url || '';
             postEl.dataset.mediaType = post.media_type || '';
             
@@ -498,23 +565,11 @@
             
             const mediaContainer = postEl.querySelector('.media-container');
             if (mediaContainer) {
-                mediaContainer.addEventListener('click', () => {
-                    Lightbox.open(post.media_url, post.media_type);
+                mediaContainer.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    Lightbox.open(post.media_url || postEl.dataset.mediaUrl, post.media_type || postEl.dataset.mediaType);
                 });
             }
-            
-            requestAnimationFrame(() => {
-                const height = postEl.offsetHeight;
-                if (height > 0) {
-                    this.postHeights.set(index, height);
-                    if (State.virtualizer) {
-                        State.virtualizer.setOptions({
-                            estimateSize: (idx) => this.postHeights.get(idx) || CONFIG.POST_HEIGHT_ESTIMATE
-                        });
-                    }
-                }
-                postEl.classList.add('visible');
-            });
             
             return postEl;
         },
@@ -547,68 +602,6 @@
                 `;
             }
         },
-        checkInfiniteScroll() {
-            if (!this.feed) return;
-            
-            const scrollTop = this.feed.scrollTop;
-            const scrollHeight = this.feed.scrollHeight;
-            const clientHeight = this.feed.clientHeight;
-            
-            if (scrollHeight - scrollTop - clientHeight < CONFIG.SCROLL_THRESHOLD) {
-                if (!State.isLoading && State.hasMore) {
-                    MessageLoader.loadMessages();
-                }
-            }
-            
-            if (scrollTop < 200 && State.newPosts.length > 0) {
-                WebSocketManager.flushNewPosts();
-            }
-        },
-        updateChannelInfo() {
-            document.getElementById('channelTitle').textContent = CONFIG.CHANNEL_TITLE;
-            document.getElementById('channelUsername').textContent = `@${CONFIG.CHANNEL_USERNAME}`;
-            const avatarEl = document.getElementById('channelAvatar');
-            if (avatarEl) {
-                avatarEl.innerHTML = `<img src="nekhebet.svg" style="width:54px; height:54px; object-fit:cover;" alt="Channel avatar" loading="lazy">`;
-            }
-        },
-        updateConnectionStatus(connected) {
-            const dot = document.getElementById('statusDot');
-            dot.classList.toggle('offline', !connected);
-        },
-        updateNewPostsBadge() {
-            const badge = document.getElementById('newPostsBadge');
-            const countSpan = document.getElementById('newPostsCount');
-            if (State.newPosts.length > 0) {
-                countSpan.textContent = State.newPosts.length;
-                badge.classList.remove('hidden');
-            } else {
-                badge.classList.add('hidden');
-            }
-        },
-        showSkeletonLoaders() {
-            if (!this.feed) return;
-            this.feed.innerHTML = '';
-            for (let i = 0; i < 3; i++) {
-                const skeleton = document.createElement('div');
-                skeleton.className = 'skeleton';
-                this.feed.appendChild(skeleton);
-            }
-        },
-        renderPosts(posts) {
-            if (!State.isVirtualizing) {
-                this.initVirtualization();
-            }
-            
-            VirtualList.update();
-            this.renderVisiblePosts();
-            
-            posts.forEach(post => {
-                if (post.has_media && !post.media_url) {
-                    this.loadPostMedia(post.message_id);
-                }
-            });
-        },
         loadPostMedia(messageId) {
             const post = State.posts.get(messageId);
             if (!post || !post.has_media || post.media_url) return;
@@ -633,17 +626,25 @@
                 });
             });
         },
-        addPostToTop(post) {
-            State.postOrder.unshift(post.message_id);
-            State.posts.set(post.message_id, post);
+        renderPosts(posts) {
+            VirtualManager.update();
             
-            if (State.isVirtualizing) {
-                VirtualList.update();
-                this.renderVisiblePosts();
-                
-                if (this.feed.scrollTop < 200) {
-                    this.feed.scrollTop = 0;
+            if (State.virtualizer) {
+                const { startIndex, endIndex } = State.virtualizer.getRange();
+                for (let i = startIndex; i <= endIndex; i++) {
+                    const messageId = State.postOrder[i];
+                    const post = State.posts.get(messageId);
+                    if (post?.has_media && !post.media_url) {
+                        this.loadPostMedia(messageId);
+                    }
                 }
+            }
+        },
+        addPostToTop(post) {
+            VirtualManager.update();
+            
+            if (VirtualManager.container && VirtualManager.container.scrollTop < 100) {
+                VirtualManager.scrollToMessage(post.message_id, 'smooth');
             }
             
             if (post.has_media && !post.media_url) {
@@ -655,6 +656,7 @@
             if (!postEl) return false;
             
             let changed = false;
+            
             if (data.text !== undefined) {
                 const textEl = postEl.querySelector('.post-text');
                 if (textEl) {
@@ -662,6 +664,7 @@
                     changed = true;
                 }
             }
+            
             if (data.edit_date) {
                 const dateEl = postEl.querySelector('.post-date');
                 if (dateEl) {
@@ -672,6 +675,7 @@
                     changed = true;
                 }
             }
+            
             if (data.media_url) {
                 const mediaContainer = postEl.querySelector('.media-container, .media-loading, .media-unavailable');
                 if (mediaContainer) {
@@ -680,7 +684,8 @@
                         mediaContainer.outerHTML = newMedia;
                         const newMediaContainer = postEl.querySelector('.media-container');
                         if (newMediaContainer) {
-                            newMediaContainer.addEventListener('click', () => {
+                            newMediaContainer.addEventListener('click', (e) => {
+                                e.stopPropagation();
                                 Lightbox.open(data.media_url, data.media_type);
                             });
                         }
@@ -690,28 +695,22 @@
                     }
                 }
             }
+            
             if (changed) {
                 postEl.classList.add('updated');
                 setTimeout(() => postEl.classList.remove('updated'), 2000);
                 
-                requestAnimationFrame(() => {
-                    const index = parseInt(postEl.dataset.virtualIndex);
-                    const height = postEl.offsetHeight;
-                    if (height > 0) {
-                        this.postHeights.set(index, height);
-                        if (State.virtualizer) {
-                            State.virtualizer.setOptions({
-                                estimateSize: (idx) => this.postHeights.get(idx) || CONFIG.POST_HEIGHT_ESTIMATE
-                            });
-                        }
-                    }
-                });
+                if (State.virtualizer) {
+                    State.virtualizer.measure();
+                }
             }
+            
             return changed;
         },
         updatePostMediaUnavailable(messageId) {
             const postEl = document.querySelector(`.post[data-message-id="${messageId}"]`);
             if (!postEl) return false;
+            
             const mediaContainer = postEl.querySelector('.media-loading');
             if (mediaContainer) {
                 mediaContainer.outerHTML = '<div class="media-unavailable">📷 Медиа недоступно</div>';
@@ -719,24 +718,25 @@
                 if (post) post.media_unavailable = true;
                 return true;
             }
+            
             return false;
         },
         deletePost(messageId) {
             const postEl = document.querySelector(`.post[data-message-id="${messageId}"]`);
             if (!postEl) return false;
             
-            const index = State.postOrder.indexOf(Number(messageId));
-            if (index !== -1) {
-                State.postOrder.splice(index, 1);
-                State.posts.delete(messageId);
-                
-                if (State.isVirtualizing) {
-                    VirtualList.update();
-                    this.renderVisiblePosts();
-                }
-            }
+            postEl.classList.add('deleted');
             
-            API.cancelMediaPoll(messageId);
+            setTimeout(() => {
+                postEl.remove();
+                State.posts.delete(messageId);
+                const index = State.postOrder.indexOf(Number(messageId));
+                if (index !== -1) State.postOrder.splice(index, 1);
+                State.itemHeights.delete(messageId);
+                API.cancelMediaPoll(messageId);
+                VirtualManager.update();
+            }, 300);
+            
             return true;
         },
         setLoaderVisible(visible) {
@@ -747,26 +747,8 @@
         },
         showScrollTopButton(visible) {
             const btn = document.getElementById('scrollTopBtn');
-            if (btn) btn.style.display = visible ? 'flex' : 'none';
-        },
-        scrollToTop(smooth = true) {
-            if (State.isVirtualizing && this.feed) {
-                this.feed.scrollTo({
-                    top: 0,
-                    behavior: smooth ? 'smooth' : 'auto'
-                });
-            } else {
-                window.scrollTo({
-                    top: 0,
-                    behavior: smooth ? 'smooth' : 'auto'
-                });
-            }
-        },
-        cleanup() {
-            VirtualList.destroy();
-            this.postHeights.clear();
-            if (this.virtualContainer) {
-                this.virtualContainer.innerHTML = '';
+            if (btn) {
+                btn.style.display = visible ? 'flex' : 'none';
             }
         }
     };
@@ -795,21 +777,28 @@
     const MessageLoader = {
         async loadMessages(reset = false) {
             if (State.isLoading) return;
+            
             if (reset) {
-                UI.cleanup();
+                VirtualManager.destroy();
                 State.posts.clear();
                 State.postOrder = [];
+                State.itemHeights.clear();
                 State.offset = 0;
                 State.hasMore = true;
+                API.clearMediaCache();
             }
+            
             if (!State.hasMore) {
                 document.getElementById('infiniteScrollTrigger').style.display = 'none';
                 return;
             }
+            
             State.isLoading = true;
             UI.setLoaderVisible(true);
+            
             try {
                 const data = await API.fetchMessages(State.offset, CONFIG.INITIAL_LIMIT);
+                
                 if (data.messages && data.messages.length > 0) {
                     State.hasMore = data.hasMore !== false;
                     State.offset += data.messages.length;
@@ -821,7 +810,22 @@
                         }
                     });
                     
-                    UI.renderPosts(data.messages);
+                    if (!State.virtualizer) {
+                        VirtualManager.init('#virtualContainer', '#virtualContent');
+                    } else {
+                        VirtualManager.update();
+                    }
+                    
+                    if (State.virtualizer) {
+                        const { startIndex, endIndex } = State.virtualizer.getRange();
+                        for (let i = startIndex; i <= endIndex; i++) {
+                            const messageId = State.postOrder[i];
+                            const post = State.posts.get(messageId);
+                            if (post?.has_media && !post.media_url) {
+                                UI.loadPostMedia(messageId);
+                            }
+                        }
+                    }
                 } else {
                     State.hasMore = false;
                 }
@@ -841,11 +845,14 @@
         show(message, type = 'info', duration = 3000) {
             const container = document.getElementById('toastContainer');
             if (!container) return;
+            
             const toast = document.createElement('div');
             toast.className = `toast ${type}`;
             const icons = { info: 'ℹ️', success: '✅', warning: '⚠️', error: '❌' };
             toast.innerHTML = `${icons[type] || 'ℹ️'} ${message}`;
+            
             container.appendChild(toast);
+            
             setTimeout(() => {
                 toast.style.opacity = '0';
                 toast.style.transform = 'translate(-50%, 20px)';
@@ -862,47 +869,59 @@
         connect() {
             try {
                 State.ws = new WebSocket(CONFIG.WS_BASE);
+                
                 State.ws.onopen = () => {
                     State.wsConnected = true;
                     State.wsReconnectAttempts = 0;
                     UI.updateConnectionStatus(true);
                     Toast.success('Подключено к серверу');
+                    
                     setInterval(() => {
                         if (State.ws && State.ws.readyState === WebSocket.OPEN) {
                             State.ws.send(JSON.stringify({ type: 'ping' }));
                         }
                     }, 30000);
                 };
+                
                 State.ws.onmessage = (event) => {
                     State.wsMessageQueue.push(event.data);
                     this.processQueue();
                 };
+                
                 State.ws.onclose = () => {
                     State.wsConnected = false;
                     UI.updateConnectionStatus(false);
                     Toast.warning('Отключено от сервера');
                     this.reconnect();
                 };
+                
                 State.ws.onerror = () => {};
+                
             } catch (err) {
                 this.reconnect();
             }
         },
+        
         async processQueue() {
             if (State.wsProcessing) return;
             State.wsProcessing = true;
+            
             while (State.wsMessageQueue.length > 0) {
                 const data = JSON.parse(State.wsMessageQueue.shift());
                 await this.handleMessage(data);
             }
+            
             State.wsProcessing = false;
         },
+        
         async handleMessage(data) {
             if (['ping', 'pong', 'welcome', 'heartbeat', 'buffering', 'flush_start', 'flush_complete'].includes(data.type)) return;
             if (data.channel_id !== parseInt(CONFIG.CHANNEL_ID)) return;
+            
             const messageKey = `${data.channel_id}-${data.message_id}`;
             const lastReceived = State.recentMessages.get(messageKey);
             if (lastReceived && (Date.now() - lastReceived < CONFIG.DEDUP_TTL)) return;
+            
             State.recentMessages.set(messageKey, Date.now());
             if (State.recentMessages.size > 100) {
                 const now = Date.now();
@@ -910,20 +929,25 @@
                     if (now - time > CONFIG.DEDUP_TTL) State.recentMessages.delete(key);
                 }
             }
+            
             switch (data.type) {
                 case 'new': this.handleNewMessage(data); break;
                 case 'edit': this.handleEditMessage(data); break;
                 case 'delete': this.handleDeleteMessage(data); break;
             }
         },
+        
         reconnect() {
             if (State.wsReconnectAttempts >= CONFIG.MAX_RECONNECT_ATTEMPTS) return;
+            
             State.wsReconnectAttempts++;
             const delay = Math.min(CONFIG.RECONNECT_BASE_DELAY * Math.pow(2, State.wsReconnectAttempts), 30000);
+            
             setTimeout(() => {
                 if (!State.wsConnected) this.connect();
             }, delay);
         },
+        
         handleNewMessage(data) {
             if (State.posts.has(data.message_id)) return;
             
@@ -947,8 +971,9 @@
             State.newPosts.push(post);
             UI.updateNewPostsBadge();
             
-            if (UI.feed && UI.feed.scrollTop < 200) {
-                WebSocketManager.flushNewPosts();
+            const container = document.getElementById('virtualContainer');
+            if (container && container.scrollTop < 200) {
+                this.flushNewPosts();
             } else {
                 if (hasMedia && !data.media_url) {
                     API.fetchMedia(data.message_id).then(mediaInfo => {
@@ -970,6 +995,7 @@
             
             Toast.info('Новое сообщение');
         },
+        
         handleEditMessage(data) {
             if (State.posts.has(data.message_id)) {
                 const post = State.posts.get(data.message_id);
@@ -980,31 +1006,86 @@
                 post.edit_date = data.edit_date;
                 State.posts.set(data.message_id, post);
             }
+            
             UI.updatePost(data.message_id, {
                 text: data.text,
                 edit_date: data.edit_date,
                 media_url: data.media_url,
                 media_type: data.media_type
             });
+            
             Toast.info('Сообщение обновлено');
         },
+        
         handleDeleteMessage(data) {
             State.posts.delete(data.message_id);
             const index = State.postOrder.indexOf(data.message_id);
             if (index !== -1) State.postOrder.splice(index, 1);
+            
             UI.deletePost(data.message_id);
             API.cancelMediaPoll(data.message_id);
+            
             Toast.warning('Сообщение удалено');
         },
+        
         flushNewPosts() {
             if (State.newPosts.length === 0) return;
+            
             while (State.newPosts.length > 0) {
                 const post = State.newPosts.shift();
                 UI.addPostToTop(post);
                 State.posts.set(post.message_id, post);
+                State.postOrder.unshift(post.message_id);
             }
+            
             UI.updateNewPostsBadge();
+            VirtualManager.update();
         }
+    };
+
+    const ScrollHandler = {
+        init() {
+            const container = document.getElementById('virtualContainer');
+            if (container) {
+                container.addEventListener('scroll', this.throttledHandle.bind(this), { passive: true });
+            }
+        },
+        
+        handle() {
+            const container = document.getElementById('virtualContainer');
+            if (!container) return;
+            
+            const scrollTop = container.scrollTop;
+            UI.showScrollTopButton(scrollTop > 500);
+            
+            if (container.scrollHeight - container.scrollTop - container.clientHeight < 500) {
+                this.debouncedLoadMore();
+            }
+            
+            if (scrollTop < 200 && State.newPosts.length > 0) {
+                WebSocketManager.flushNewPosts();
+            }
+        },
+        
+        throttledHandle: (() => {
+            let ticking = false;
+            const self = this;
+            return function() {
+                if (!ticking) {
+                    requestAnimationFrame(() => {
+                        ScrollHandler.handle();
+                        ticking = false;
+                    });
+                    ticking = true;
+                }
+            };
+        })(),
+        
+        debouncedLoadMore: debounce(() => {
+            if (!State.isLoading && State.hasMore) {
+                MessageLoader.loadMessages();
+            }
+        }, 300, { leading: true, trailing: false })
     };
 
     function init() {
@@ -1012,8 +1093,9 @@
         UI.updateChannelInfo();
         MessageLoader.loadInitial();
         WebSocketManager.connect();
+        ScrollHandler.init();
 
-        document.getElementById('feed').addEventListener('click', (e) => {
+        document.getElementById('virtualContent').addEventListener('click', (e) => {
             const container = e.target.closest('.media-container');
             if (container) {
                 const post = container.closest('.post');
@@ -1023,18 +1105,38 @@
             }
         });
 
-        document.getElementById('channelAvatar').addEventListener('click', () => ThemeManager.toggle());
-        document.getElementById('newPostsBadge').addEventListener('click', () => {
-            UI.scrollToTop(true);
-            WebSocketManager.flushNewPosts();
-        });
-        document.getElementById('scrollTopBtn').addEventListener('click', () => {
-            UI.scrollToTop(true);
-        });
-        document.getElementById('lightboxClose').addEventListener('click', Lightbox.close);
-        document.getElementById('lightbox').addEventListener('click', (e) => {
-            if (e.target === document.getElementById('lightbox')) Lightbox.close();
-        });
+        const avatarEl = document.getElementById('channelAvatar');
+        if (avatarEl) {
+            avatarEl.addEventListener('click', () => ThemeManager.toggle());
+        }
+
+        const newPostsBadge = document.getElementById('newPostsBadge');
+        if (newPostsBadge) {
+            newPostsBadge.addEventListener('click', () => {
+                VirtualManager.scrollToTop('smooth');
+                WebSocketManager.flushNewPosts();
+            });
+        }
+
+        const scrollTopBtn = document.getElementById('scrollTopBtn');
+        if (scrollTopBtn) {
+            scrollTopBtn.addEventListener('click', () => {
+                VirtualManager.scrollToTop('smooth');
+            });
+        }
+
+        const lightboxClose = document.getElementById('lightboxClose');
+        if (lightboxClose) {
+            lightboxClose.addEventListener('click', Lightbox.close);
+        }
+
+        const lightbox = document.getElementById('lightbox');
+        if (lightbox) {
+            lightbox.addEventListener('click', (e) => {
+                if (e.target === lightbox) Lightbox.close();
+            });
+        }
+
         document.addEventListener('visibilitychange', () => {
             if (!document.hidden && State.newPosts.length > 0) {
                 WebSocketManager.flushNewPosts();
