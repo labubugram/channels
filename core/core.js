@@ -14,12 +14,14 @@
         MAX_MEDIA_POLL_ATTEMPTS: 12,
         MAX_VISIBLE_POSTS: 100,
         LAZY_LOAD_OFFSET: 500,
-        IMAGE_UNLOAD_DISTANCE: 1000,
         DEDUP_TTL: 5000,
         WS_BASE: (() => {
             const apiBase = document.querySelector('meta[name="mirror:api-base"]')?.content || 'https://0808.us.nekhebet.su:8081';
             return apiBase.replace('http://', 'ws://').replace('https://', 'wss://');
-        })()
+        })(),
+        VIRTUAL_OVERSCAN: 5,
+        POST_HEIGHT_ESTIMATE: 400,
+        SCROLL_THRESHOLD: 500
     };
 
     const State = {
@@ -35,15 +37,17 @@
         mediaCache: new Map(),
         mediaErrorCache: new Set(),
         mediaPollingQueue: new Map(),
-        scrollTimeout: null,
         recentMessages: new Map(),
         lastDocumentHeight: 0,
         theme: localStorage.getItem('theme') || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'),
-        visiblePosts: new Set(),
         isTransitioning: false,
         pendingTheme: null,
         wsMessageQueue: [],
-        wsProcessing: false
+        wsProcessing: false,
+        virtualizer: null,
+        virtualRows: [],
+        totalHeight: 0,
+        isVirtualizing: false
     };
 
     const Security = {
@@ -177,17 +181,6 @@
         };
     };
 
-    const throttle = (fn, limit) => {
-        let inThrottle;
-        return function(...args) {
-            if (!inThrottle) {
-                fn.apply(this, args);
-                inThrottle = true;
-                setTimeout(() => inThrottle = false, limit);
-            }
-        };
-    };
-
     const API = {
         async fetchMessages(offset = 0, limit = CONFIG.INITIAL_LIMIT) {
             try {
@@ -206,14 +199,6 @@
             if (!Security.validateMessageId(messageId)) return null;
             if (State.mediaErrorCache.has(messageId)) return null;
             if (State.mediaCache.has(messageId)) return State.mediaCache.get(messageId);
-            if (State.mediaPollingQueue.has(messageId)) {
-                const { attempts } = State.mediaPollingQueue.get(messageId);
-                if (attempts >= CONFIG.MAX_MEDIA_POLL_ATTEMPTS) {
-                    State.mediaErrorCache.add(messageId);
-                    State.mediaPollingQueue.delete(messageId);
-                    return null;
-                }
-            }
             try {
                 const response = await fetch(`${CONFIG.API_BASE}/api/media/by-message/${messageId}?channel_id=${CONFIG.CHANNEL_ID}`);
                 if (!response.ok) {
@@ -223,11 +208,6 @@
                 const data = await response.json();
                 if (data && data.url) {
                     State.mediaCache.set(messageId, data);
-                    if (State.mediaPollingQueue.has(messageId)) {
-                        const { timeoutId } = State.mediaPollingQueue.get(messageId);
-                        if (timeoutId) clearTimeout(timeoutId);
-                        State.mediaPollingQueue.delete(messageId);
-                    }
                     return data;
                 }
             } catch (err) {}
@@ -256,10 +236,6 @@
                         }
                         callback(mediaInfo.url, false);
                     } else {
-                        if (State.mediaPollingQueue.has(messageId)) {
-                            const { timeoutId } = State.mediaPollingQueue.get(messageId);
-                            if (timeoutId) clearTimeout(timeoutId);
-                        }
                         const timeoutId = setTimeout(() => poll(attempt + 1), CONFIG.MEDIA_POLL_INTERVAL);
                         State.mediaPollingQueue.set(messageId, { attempts: attempt, timeoutId });
                     }
@@ -276,13 +252,6 @@
                 if (timeoutId) clearTimeout(timeoutId);
                 State.mediaPollingQueue.delete(messageId);
             }
-        },
-        clearMediaCache() {
-            State.mediaCache.clear();
-            State.mediaErrorCache.clear();
-            State.mediaPollingQueue.forEach((_, msgId) => {
-                this.cancelMediaPoll(msgId);
-            });
         }
     };
 
@@ -355,129 +324,137 @@
         }
     };
 
-    const UI = {
-        observer: null,
-        initIntersectionObserver() {
-            if (this.observer) {
-                this.observer.disconnect();
-            }
-            this.observer = new IntersectionObserver((entries) => {
-                entries.forEach(entry => {
-                    const post = entry.target;
-                    const msgId = Number(post.dataset.messageId);
-                    if (entry.isIntersecting) {
-                        State.visiblePosts.add(msgId);
-                        this.loadPostMedia(msgId);
-                    } else {
-                        State.visiblePosts.delete(msgId);
-                        this.unloadPostMedia(msgId);
-                    }
-                });
-            }, {
-                rootMargin: `${CONFIG.LAZY_LOAD_OFFSET}px`,
-                threshold: 0.01
-            });
-            document.querySelectorAll('.post').forEach(post => {
-                this.observer.observe(post);
-            });
-        },
-        loadPostMedia(messageId) {
-            const post = State.posts.get(messageId);
-            if (!post || !post.has_media || post.media_url) return;
+    const VirtualList = {
+        init(container) {
+            if (!container || !window.Virtualizer) return;
             
-            API.fetchMedia(messageId).then(mediaInfo => {
-                if (mediaInfo && mediaInfo.url) {
-                    post.media_url = mediaInfo.url;
-                    post.media_type = mediaInfo.file_type || post.media_type;
-                    this.updatePost(messageId, {
-                        media_url: mediaInfo.url,
-                        media_type: post.media_type
-                    });
-                }
-            }).catch(() => {
-                API.pollMedia(messageId, (url, failed) => {
-                    if (url) {
-                        post.media_url = url;
-                        this.updatePost(messageId, { media_url: url });
-                    } else if (failed) {
-                        this.updatePostMediaUnavailable(messageId);
+            State.virtualizer = new window.Virtualizer({
+                count: State.postOrder.length,
+                getScrollElement: () => container,
+                estimateSize: () => CONFIG.POST_HEIGHT_ESTIMATE,
+                overscan: CONFIG.VIRTUAL_OVERSCAN
+            });
+            
+            State.isVirtualizing = true;
+            this.update();
+        },
+        update() {
+            if (!State.virtualizer) return;
+            
+            State.virtualizer.setOptions({
+                count: State.postOrder.length
+            });
+            
+            State.virtualRows = State.virtualizer.getVirtualItems();
+            State.totalHeight = State.virtualizer.getTotalSize();
+            
+            if (State.virtualRows.length > 0) {
+                const startIndex = State.virtualRows[0].index;
+                const endIndex = State.virtualRows[State.virtualRows.length - 1].index;
+                
+                document.querySelectorAll('.virtual-post').forEach(el => {
+                    const index = parseInt(el.dataset.virtualIndex);
+                    if (index < startIndex || index > endIndex) {
+                        if (el.parentNode) el.remove();
                     }
                 });
+            }
+        },
+        getVisibleRange() {
+            if (!State.virtualRows.length) return { start: 0, end: 0 };
+            return {
+                start: State.virtualRows[0].index,
+                end: State.virtualRows[State.virtualRows.length - 1].index
+            };
+        },
+        scrollToIndex(index, smooth = false) {
+            if (!State.virtualizer) return;
+            State.virtualizer.scrollToIndex(index, {
+                align: 'start',
+                behavior: smooth ? 'smooth' : 'auto'
             });
         },
-        unloadPostMedia(messageId) {
-            if (!CONFIG.IMAGE_UNLOAD_DISTANCE) return;
-            const postEl = document.querySelector(`.post[data-message-id="${messageId}"]`);
-            if (!postEl) return;
-            const rect = postEl.getBoundingClientRect();
-            const viewportHeight = window.innerHeight;
-            if (rect.top > viewportHeight + CONFIG.IMAGE_UNLOAD_DISTANCE || rect.bottom < -CONFIG.IMAGE_UNLOAD_DISTANCE) {
-                const mediaContainer = postEl.querySelector('.media-container');
-                if (mediaContainer) {
-                    const img = mediaContainer.querySelector('img');
-                    if (img) {
-                        const currentSrc = img.src;
-                        img.dataset.src = currentSrc;
-                        img.src = '';
-                        img.srcset = '';
-                        mediaContainer.innerHTML = '<div class="media-placeholder">📷</div>';
-                    }
-                    const video = mediaContainer.querySelector('video');
-                    if (video) {
-                        video.pause();
-                        video.src = '';
-                        video.load();
-                    }
+        destroy() {
+            State.virtualizer = null;
+            State.virtualRows = [];
+            State.totalHeight = 0;
+            State.isVirtualizing = false;
+        }
+    };
+
+    const UI = {
+        feed: null,
+        virtualContainer: null,
+        postHeights: new Map(),
+        initVirtualization() {
+            this.feed = document.getElementById('feed');
+            if (!this.feed) return;
+            
+            this.feed.style.position = 'relative';
+            this.feed.style.height = '100%';
+            this.feed.style.overflowY = 'auto';
+            
+            this.virtualContainer = document.createElement('div');
+            this.virtualContainer.style.position = 'relative';
+            this.virtualContainer.style.width = '100%;
+            this.virtualContainer.style.height = `${State.totalHeight}px`;
+            
+            this.feed.innerHTML = '';
+            this.feed.appendChild(this.virtualContainer);
+            
+            VirtualList.init(this.feed);
+            
+            this.feed.addEventListener('scroll', () => {
+                if (!State.isVirtualizing) return;
+                VirtualList.update();
+                this.renderVisiblePosts();
+                this.checkInfiniteScroll();
+            });
+        },
+        renderVisiblePosts() {
+            if (!State.isVirtualizing || !this.virtualContainer) return;
+            
+            const { start, end } = VirtualList.getVisibleRange();
+            const fragment = document.createDocumentFragment();
+            const existingPosts = new Map();
+            
+            this.virtualContainer.querySelectorAll('.virtual-post').forEach(el => {
+                const index = parseInt(el.dataset.virtualIndex);
+                existingPosts.set(index, el);
+            });
+            
+            for (let i = start; i <= end; i++) {
+                if (i >= State.postOrder.length) break;
+                
+                if (existingPosts.has(i)) {
+                    existingPosts.delete(i);
+                    continue;
                 }
+                
+                const messageId = State.postOrder[i];
+                const post = State.posts.get(messageId);
+                if (!post) continue;
+                
+                const postEl = this.createVirtualPostElement(post, i);
+                const top = State.virtualRows.find(v => v.index === i)?.start || i * CONFIG.POST_HEIGHT_ESTIMATE;
+                
+                postEl.style.position = 'absolute';
+                postEl.style.top = '0';
+                postEl.style.transform = `translateY(${top}px)`;
+                postEl.style.width = '100%';
+                
+                fragment.appendChild(postEl);
             }
+            
+            this.virtualContainer.appendChild(fragment);
+            
+            existingPosts.forEach(el => el.remove());
         },
-        trimOldPosts() {
-            const posts = document.querySelectorAll('.post');
-            if (posts.length > CONFIG.MAX_VISIBLE_POSTS) {
-                const toRemove = Array.from(posts).slice(0, posts.length - CONFIG.MAX_VISIBLE_POSTS);
-                toRemove.forEach(el => {
-                    if (this.observer) {
-                        this.observer.unobserve(el);
-                    }
-                    el.remove();
-                });
-            }
-        },
-        updateChannelInfo() {
-            document.getElementById('channelTitle').textContent = CONFIG.CHANNEL_TITLE;
-            document.getElementById('channelUsername').textContent = `@${CONFIG.CHANNEL_USERNAME}`;
-            const avatarEl = document.getElementById('channelAvatar');
-            if (avatarEl) {
-                avatarEl.innerHTML = `<img src="nekhebet.svg" style="width:54px; height:54px; object-fit:cover;" alt="Channel avatar" loading="lazy">`;
-            }
-        },
-        updateConnectionStatus(connected) {
-            const dot = document.getElementById('statusDot');
-            dot.classList.toggle('offline', !connected);
-        },
-        updateNewPostsBadge() {
-            const badge = document.getElementById('newPostsBadge');
-            const countSpan = document.getElementById('newPostsCount');
-            if (State.newPosts.length > 0) {
-                countSpan.textContent = State.newPosts.length;
-                badge.classList.remove('hidden');
-            } else {
-                badge.classList.add('hidden');
-            }
-        },
-        showSkeletonLoaders() {
-            const feed = document.getElementById('feed');
-            feed.innerHTML = '';
-            for (let i = 0; i < 3; i++) {
-                const skeleton = document.createElement('div');
-                skeleton.className = 'skeleton';
-                feed.appendChild(skeleton);
-            }
-        },
-        createPostElement(post) {
+        createVirtualPostElement(post, index) {
             const postEl = document.createElement('div');
-            postEl.className = 'post';
+            postEl.className = 'post virtual-post';
             postEl.dataset.messageId = post.message_id;
+            postEl.dataset.virtualIndex = index;
             postEl.dataset.mediaUrl = post.media_url || '';
             postEl.dataset.mediaType = post.media_type || '';
             
@@ -526,6 +503,19 @@
                 });
             }
             
+            requestAnimationFrame(() => {
+                const height = postEl.offsetHeight;
+                if (height > 0) {
+                    this.postHeights.set(index, height);
+                    if (State.virtualizer) {
+                        State.virtualizer.setOptions({
+                            estimateSize: (idx) => this.postHeights.get(idx) || CONFIG.POST_HEIGHT_ESTIMATE
+                        });
+                    }
+                }
+                postEl.classList.add('visible');
+            });
+            
             return postEl;
         },
         renderMedia(url, type) {
@@ -557,23 +547,61 @@
                 `;
             }
         },
-        renderPosts(posts) {
-            const feed = document.getElementById('feed');
-            const fragment = document.createDocumentFragment();
-            posts.forEach(post => {
-                const postEl = this.createPostElement(post);
-                fragment.appendChild(postEl);
-            });
-            feed.appendChild(fragment);
-            feed.querySelectorAll('.post').forEach(post => {
-                requestAnimationFrame(() => post.classList.add('visible'));
-            });
-            if (this.observer) {
-                feed.querySelectorAll('.post').forEach(post => {
-                    this.observer.observe(post);
-                });
+        checkInfiniteScroll() {
+            if (!this.feed) return;
+            
+            const scrollTop = this.feed.scrollTop;
+            const scrollHeight = this.feed.scrollHeight;
+            const clientHeight = this.feed.clientHeight;
+            
+            if (scrollHeight - scrollTop - clientHeight < CONFIG.SCROLL_THRESHOLD) {
+                if (!State.isLoading && State.hasMore) {
+                    MessageLoader.loadMessages();
+                }
             }
-            this.trimOldPosts();
+            
+            if (scrollTop < 200 && State.newPosts.length > 0) {
+                WebSocketManager.flushNewPosts();
+            }
+        },
+        updateChannelInfo() {
+            document.getElementById('channelTitle').textContent = CONFIG.CHANNEL_TITLE;
+            document.getElementById('channelUsername').textContent = `@${CONFIG.CHANNEL_USERNAME}`;
+            const avatarEl = document.getElementById('channelAvatar');
+            if (avatarEl) {
+                avatarEl.innerHTML = `<img src="nekhebet.svg" style="width:54px; height:54px; object-fit:cover;" alt="Channel avatar" loading="lazy">`;
+            }
+        },
+        updateConnectionStatus(connected) {
+            const dot = document.getElementById('statusDot');
+            dot.classList.toggle('offline', !connected);
+        },
+        updateNewPostsBadge() {
+            const badge = document.getElementById('newPostsBadge');
+            const countSpan = document.getElementById('newPostsCount');
+            if (State.newPosts.length > 0) {
+                countSpan.textContent = State.newPosts.length;
+                badge.classList.remove('hidden');
+            } else {
+                badge.classList.add('hidden');
+            }
+        },
+        showSkeletonLoaders() {
+            if (!this.feed) return;
+            this.feed.innerHTML = '';
+            for (let i = 0; i < 3; i++) {
+                const skeleton = document.createElement('div');
+                skeleton.className = 'skeleton';
+                this.feed.appendChild(skeleton);
+            }
+        },
+        renderPosts(posts) {
+            if (!State.isVirtualizing) {
+                this.initVirtualization();
+            }
+            
+            VirtualList.update();
+            this.renderVisiblePosts();
             
             posts.forEach(post => {
                 if (post.has_media && !post.media_url) {
@@ -581,22 +609,42 @@
                 }
             });
         },
-        addPostToTop(post) {
-            const feed = document.getElementById('feed');
-            const postEl = this.createPostElement(post);
-            if (feed.firstChild) {
-                feed.insertBefore(postEl, feed.firstChild);
-            } else {
-                feed.appendChild(postEl);
-            }
-            requestAnimationFrame(() => {
-                postEl.classList.add('visible', 'new');
+        loadPostMedia(messageId) {
+            const post = State.posts.get(messageId);
+            if (!post || !post.has_media || post.media_url) return;
+            
+            API.fetchMedia(messageId).then(mediaInfo => {
+                if (mediaInfo && mediaInfo.url) {
+                    post.media_url = mediaInfo.url;
+                    post.media_type = mediaInfo.file_type || post.media_type;
+                    this.updatePost(messageId, {
+                        media_url: mediaInfo.url,
+                        media_type: post.media_type
+                    });
+                }
+            }).catch(() => {
+                API.pollMedia(messageId, (url, failed) => {
+                    if (url) {
+                        post.media_url = url;
+                        this.updatePost(messageId, { media_url: url });
+                    } else if (failed) {
+                        this.updatePostMediaUnavailable(messageId);
+                    }
+                });
             });
-            setTimeout(() => postEl.classList.remove('new'), 3000);
-            if (this.observer) {
-                this.observer.observe(postEl);
+        },
+        addPostToTop(post) {
+            State.postOrder.unshift(post.message_id);
+            State.posts.set(post.message_id, post);
+            
+            if (State.isVirtualizing) {
+                VirtualList.update();
+                this.renderVisiblePosts();
+                
+                if (this.feed.scrollTop < 200) {
+                    this.feed.scrollTop = 0;
+                }
             }
-            this.trimOldPosts();
             
             if (post.has_media && !post.media_url) {
                 this.loadPostMedia(post.message_id);
@@ -605,6 +653,7 @@
         updatePost(messageId, data) {
             const postEl = document.querySelector(`.post[data-message-id="${messageId}"]`);
             if (!postEl) return false;
+            
             let changed = false;
             if (data.text !== undefined) {
                 const textEl = postEl.querySelector('.post-text');
@@ -644,6 +693,19 @@
             if (changed) {
                 postEl.classList.add('updated');
                 setTimeout(() => postEl.classList.remove('updated'), 2000);
+                
+                requestAnimationFrame(() => {
+                    const index = parseInt(postEl.dataset.virtualIndex);
+                    const height = postEl.offsetHeight;
+                    if (height > 0) {
+                        this.postHeights.set(index, height);
+                        if (State.virtualizer) {
+                            State.virtualizer.setOptions({
+                                estimateSize: (idx) => this.postHeights.get(idx) || CONFIG.POST_HEIGHT_ESTIMATE
+                            });
+                        }
+                    }
+                });
             }
             return changed;
         },
@@ -662,17 +724,19 @@
         deletePost(messageId) {
             const postEl = document.querySelector(`.post[data-message-id="${messageId}"]`);
             if (!postEl) return false;
-            if (this.observer) {
-                this.observer.unobserve(postEl);
-            }
-            postEl.classList.add('deleted');
-            setTimeout(() => {
-                postEl.remove();
+            
+            const index = State.postOrder.indexOf(Number(messageId));
+            if (index !== -1) {
+                State.postOrder.splice(index, 1);
                 State.posts.delete(messageId);
-                const index = State.postOrder.indexOf(Number(messageId));
-                if (index !== -1) State.postOrder.splice(index, 1);
-                API.cancelMediaPoll(messageId);
-            }, 300);
+                
+                if (State.isVirtualizing) {
+                    VirtualList.update();
+                    this.renderVisiblePosts();
+                }
+            }
+            
+            API.cancelMediaPoll(messageId);
             return true;
         },
         setLoaderVisible(visible) {
@@ -685,12 +749,25 @@
             const btn = document.getElementById('scrollTopBtn');
             if (btn) btn.style.display = visible ? 'flex' : 'none';
         },
-        cleanup() {
-            if (this.observer) {
-                this.observer.disconnect();
-                this.observer = null;
+        scrollToTop(smooth = true) {
+            if (State.isVirtualizing && this.feed) {
+                this.feed.scrollTo({
+                    top: 0,
+                    behavior: smooth ? 'smooth' : 'auto'
+                });
+            } else {
+                window.scrollTo({
+                    top: 0,
+                    behavior: smooth ? 'smooth' : 'auto'
+                });
             }
-            API.clearMediaCache();
+        },
+        cleanup() {
+            VirtualList.destroy();
+            this.postHeights.clear();
+            if (this.virtualContainer) {
+                this.virtualContainer.innerHTML = '';
+            }
         }
     };
 
@@ -722,10 +799,8 @@
                 UI.cleanup();
                 State.posts.clear();
                 State.postOrder = [];
-                document.getElementById('feed').innerHTML = '';
                 State.offset = 0;
                 State.hasMore = true;
-                API.clearMediaCache();
             }
             if (!State.hasMore) {
                 document.getElementById('infiniteScrollTrigger').style.display = 'none';
@@ -738,17 +813,15 @@
                 if (data.messages && data.messages.length > 0) {
                     State.hasMore = data.hasMore !== false;
                     State.offset += data.messages.length;
-                    const newMessages = [];
+                    
                     data.messages.forEach(post => {
                         if (!State.posts.has(post.message_id)) {
                             State.posts.set(post.message_id, post);
                             State.postOrder.push(post.message_id);
-                            newMessages.push(post);
                         }
                     });
-                    if (newMessages.length > 0) {
-                        UI.renderPosts(newMessages);
-                    }
+                    
+                    UI.renderPosts(data.messages);
                 } else {
                     State.hasMore = false;
                 }
@@ -761,7 +834,6 @@
         async loadInitial() {
             UI.showSkeletonLoaders();
             await this.loadMessages(true);
-            UI.initIntersectionObserver();
         }
     };
 
@@ -875,7 +947,7 @@
             State.newPosts.push(post);
             UI.updateNewPostsBadge();
             
-            if (window.scrollY < 200) {
+            if (UI.feed && UI.feed.scrollTop < 200) {
                 WebSocketManager.flushNewPosts();
             } else {
                 if (hasMedia && !data.media_url) {
@@ -930,49 +1002,9 @@
                 const post = State.newPosts.shift();
                 UI.addPostToTop(post);
                 State.posts.set(post.message_id, post);
-                State.postOrder.unshift(post.message_id);
             }
             UI.updateNewPostsBadge();
         }
-    };
-
-    const ScrollHandler = {
-        init() {
-            State.lastDocumentHeight = document.documentElement.scrollHeight;
-            const resizeObserver = new ResizeObserver(() => {
-                State.lastDocumentHeight = document.documentElement.scrollHeight;
-            });
-            resizeObserver.observe(document.documentElement);
-            window.addEventListener('scroll', this.throttledHandle.bind(this), { passive: true });
-        },
-        handle(scrollY) {
-            UI.showScrollTopButton(scrollY > 500);
-            if (scrollY + window.innerHeight >= State.lastDocumentHeight - 500) {
-                this.debouncedLoadMore();
-            }
-            if (scrollY < 200 && State.newPosts.length > 0) {
-                WebSocketManager.flushNewPosts();
-            }
-        },
-        throttledHandle: (() => {
-            let ticking = false;
-            let lastScrollY = 0;
-            return function() {
-                lastScrollY = window.scrollY;
-                if (!ticking) {
-                    requestAnimationFrame(() => {
-                        this.handle(lastScrollY);
-                        ticking = false;
-                    });
-                    ticking = true;
-                }
-            };
-        })(),
-        debouncedLoadMore: debounce(() => {
-            if (!State.isLoading && State.hasMore) {
-                MessageLoader.loadMessages();
-            }
-        }, 300, { leading: true, trailing: false })
     };
 
     function init() {
@@ -980,7 +1012,6 @@
         UI.updateChannelInfo();
         MessageLoader.loadInitial();
         WebSocketManager.connect();
-        ScrollHandler.init();
 
         document.getElementById('feed').addEventListener('click', (e) => {
             const container = e.target.closest('.media-container');
@@ -994,11 +1025,11 @@
 
         document.getElementById('channelAvatar').addEventListener('click', () => ThemeManager.toggle());
         document.getElementById('newPostsBadge').addEventListener('click', () => {
-            window.scrollTo({ top: 0, behavior: 'smooth' });
+            UI.scrollToTop(true);
             WebSocketManager.flushNewPosts();
         });
         document.getElementById('scrollTopBtn').addEventListener('click', () => {
-            window.scrollTo({ top: 0, behavior: 'smooth' });
+            UI.scrollToTop(true);
         });
         document.getElementById('lightboxClose').addEventListener('click', Lightbox.close);
         document.getElementById('lightbox').addEventListener('click', (e) => {
