@@ -359,6 +359,9 @@
             this.feed = document.getElementById('feed');
             this.topSpacer = document.createElement('div');
             this.bottomSpacer = document.createElement('div');
+            this.topSpacer.className = 'virtual-spacer';
+            this.bottomSpacer.className = 'virtual-spacer';
+            this.feed.innerHTML = '';
             this.feed.appendChild(this.topSpacer);
             this.feed.appendChild(this.bottomSpacer);
             this.setupIntersectionObserver();
@@ -440,22 +443,25 @@
             this.topSpacer.style.height = topHeight + 'px';
             this.bottomSpacer.style.height = bottomHeight + 'px';
 
-            const fragment = document.createDocumentFragment();
-            visibleIds.forEach(id => {
-                const post = State.posts.get(id);
-                if (post) {
-                    const postEl = UI.createPostElement(post);
-                    fragment.appendChild(postEl);
-                }
-            });
-
             const oldPosts = this.feed.querySelectorAll('.post');
             oldPosts.forEach(el => {
                 if (this.observer) this.observer.unobserve(el);
                 el.remove();
             });
 
-            this.bottomSpacer.before(fragment);
+            const fragment = document.createDocumentFragment();
+            visibleIds.forEach(id => {
+                const post = State.posts.get(id);
+                if (post) {
+                    const postEl = UI.createPostElement(post);
+                    postEl.classList.add('visible');
+                    fragment.appendChild(postEl);
+                }
+            });
+
+            if (fragment.children.length > 0) {
+                this.bottomSpacer.before(fragment);
+            }
 
             this.feed.querySelectorAll('.post').forEach(el => {
                 if (this.observer) this.observer.observe(el);
@@ -497,10 +503,12 @@
 
         showSkeletonLoaders() {
             VirtualList.feed.innerHTML = '';
+            VirtualList.feed.appendChild(VirtualList.topSpacer);
+            VirtualList.feed.appendChild(VirtualList.bottomSpacer);
             for (let i = 0; i < 3; i++) {
                 const skeleton = document.createElement('div');
                 skeleton.className = 'skeleton';
-                VirtualList.feed.appendChild(skeleton);
+                VirtualList.bottomSpacer.before(skeleton);
             }
         },
 
