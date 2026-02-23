@@ -13,9 +13,8 @@
         MEDIA_POLL_INTERVAL: 5000,
         MAX_MEDIA_POLL_ATTEMPTS: 12,
         DEDUP_TTL: 5000,
-        BUFFER: 8,
-        ESTIMATED_HEIGHT: 200,
-        VIDEO_HEIGHT: 400,
+        BUFFER: 6,
+        ESTIMATED_HEIGHT: 300,
         LAZY_LOAD_OFFSET: 500,
         WS_BASE: (() => {
             const apiBase = document.querySelector('meta[name="mirror:api-base"]')?.content || 'https://0808.us.nekhebet.su:8081';
@@ -46,8 +45,7 @@
         visiblePosts: new Set(),
         isTransitioning: false,
         pendingTheme: null,
-        mediaLoading: new Set(),
-        videoPlayers: new Map()
+        initialMediaLoaded: false
     };
 
     const Security = {
@@ -162,80 +160,6 @@
         }
     };
 
-    const VideoManager = {
-        initVideo(element, messageId, src) {
-            if (!element) return;
-            
-            const video = element.querySelector('video');
-            if (!video) return;
-            
-            video.controls = true;
-            video.playsInline = true;
-            video.preload = 'metadata';
-            video.muted = true;
-            
-            const playVideo = () => {
-                if (State.visiblePosts.has(messageId)) {
-                    video.play().catch(() => {});
-                } else {
-                    video.pause();
-                }
-            };
-            
-            const pauseVideo = () => {
-                video.pause();
-            };
-            
-            State.videoPlayers.set(messageId, {
-                element: video,
-                play: playVideo,
-                pause: pauseVideo
-            });
-            
-            video.addEventListener('loadedmetadata', () => {
-                const postEl = element.closest('.post');
-                if (postEl) {
-                    const currentHeight = postEl.offsetHeight;
-                    if (currentHeight > CONFIG.ESTIMATED_HEIGHT) {
-                        State.postHeights.set(messageId, currentHeight);
-                        VirtualList.rebuildOffsets();
-                    }
-                }
-            });
-            
-            video.addEventListener('click', (e) => {
-                e.stopPropagation();
-                if (video.paused) {
-                    video.play().catch(() => {});
-                } else {
-                    video.pause();
-                }
-            });
-        },
-        
-        updateVisibility() {
-            State.videoPlayers.forEach((player, messageId) => {
-                if (State.visiblePosts.has(messageId)) {
-                    player.play();
-                } else {
-                    player.pause();
-                }
-            });
-        },
-        
-        cleanup(messageId) {
-            if (State.videoPlayers.has(messageId)) {
-                const player = State.videoPlayers.get(messageId);
-                if (player.element) {
-                    player.element.pause();
-                    player.element.src = '';
-                    player.element.load();
-                }
-                State.videoPlayers.delete(messageId);
-            }
-        }
-    };
-
     const debounce = (fn, delay, options = {}) => {
         let timeoutId;
         let lastCall = 0;
@@ -291,12 +215,6 @@
                 return State.mediaCache.get(messageId);
             }
             
-            if (State.mediaLoading.has(messageId)) {
-                return null;
-            }
-            
-            State.mediaLoading.add(messageId);
-            
             try {
                 const url = `${CONFIG.API_BASE}/api/media/by-message/${messageId}?channel_id=${CONFIG.CHANNEL_ID}`;
                 const response = await fetch(url);
@@ -320,8 +238,6 @@
                 return null;
             } catch (err) {
                 return null;
-            } finally {
-                State.mediaLoading.delete(messageId);
             }
         },
         pollMedia(messageId, callback, maxAttempts = CONFIG.MAX_MEDIA_POLL_ATTEMPTS) {
@@ -445,8 +361,6 @@
         topSpacer: null,
         bottomSpacer: null,
         observer: null,
-        isRendering: false,
-        pendingRender: false,
 
         init() {
             this.feed = document.getElementById('feed');
@@ -462,26 +376,16 @@
 
         setupIntersectionObserver() {
             this.observer = new IntersectionObserver((entries) => {
-                let needsVideoUpdate = false;
-                
                 entries.forEach(entry => {
-                    const postId = Number(entry.target.dataset.messageId);
-                    
                     if (entry.isIntersecting) {
+                        const postId = Number(entry.target.dataset.messageId);
                         State.visiblePosts.add(postId);
-                        if (!State.mediaErrorCache.has(postId)) {
-                            UI.loadPostMedia(postId);
-                        }
-                        needsVideoUpdate = true;
+                        UI.loadPostMedia(postId);
                     } else {
+                        const postId = Number(entry.target.dataset.messageId);
                         State.visiblePosts.delete(postId);
-                        needsVideoUpdate = true;
                     }
                 });
-                
-                if (needsVideoUpdate) {
-                    VideoManager.updateVisibility();
-                }
             }, {
                 rootMargin: `${CONFIG.LAZY_LOAD_OFFSET}px`,
                 threshold: 0.01
@@ -523,18 +427,7 @@
         },
 
         render() {
-            if (this.isRendering) {
-                this.pendingRender = true;
-                return;
-            }
-            
-            this.isRendering = true;
-            this.pendingRender = false;
-
-            if (State.postOrder.length === 0) {
-                this.isRendering = false;
-                return;
-            }
+            if (State.postOrder.length === 0) return;
 
             const scrollTop = window.scrollY;
             const viewportHeight = window.innerHeight;
@@ -559,9 +452,7 @@
 
             const oldPosts = this.feed.querySelectorAll('.post');
             oldPosts.forEach(el => {
-                const id = Number(el.dataset.messageId);
                 if (this.observer) this.observer.unobserve(el);
-                VideoManager.cleanup(id);
                 el.remove();
             });
 
@@ -584,12 +475,6 @@
             });
 
             this.measureVisibleHeights();
-            
-            this.isRendering = false;
-            
-            if (this.pendingRender) {
-                this.render();
-            }
         },
 
         throttledRender: throttle(function() {
@@ -634,56 +519,6 @@
             }
         },
 
-        isVideoType(url, type) {
-            if (type) {
-                const typeStr = String(type).toLowerCase();
-                if (typeStr.includes('video') || typeStr.includes('animation') || typeStr === 'messagemediadocument') {
-                    return true;
-                }
-            }
-            if (url && url.match(/\.(mp4|webm|mov|gif)$/i)) {
-                return true;
-            }
-            return false;
-        },
-
-        renderMedia(url, type) {
-            if (!url) return '';
-            
-            const fullUrl = url.startsWith('http') ? url : `${CONFIG.API_BASE}${url}`;
-            
-            let isVideo = this.isVideoType(url, type);
-            
-            if (isVideo) {
-                return `
-                    <div class="media-container video-container" style="min-height: ${CONFIG.VIDEO_HEIGHT}px; background: #000;">
-                        <video 
-                            src="${fullUrl}" 
-                            controls
-                            preload="metadata" 
-                            playsinline
-                            muted
-                            style="width: 100%; max-height: ${CONFIG.VIDEO_HEIGHT}px; background: #000;">
-                            Ваш браузер не поддерживает видео.
-                        </video>
-                    </div>
-                `;
-            } else {
-                return `
-                    <div class="media-container image-container" style="min-height: 200px; background: var(--bg-secondary);">
-                        <img 
-                            src="${fullUrl}" 
-                            alt="Media" 
-                            loading="lazy" 
-                            decoding="async"
-                            style="width: 100%; max-height: 500px; object-fit: contain;"
-                            onload="this.parentElement.style.minHeight = 'auto';"
-                            onerror="this.onerror=null; this.parentElement.innerHTML='<div class=\\'media-error\\'>📷 Ошибка загрузки</div>';">
-                    </div>
-                `;
-            }
-        },
-
         createPostElement(post) {
             const postEl = document.createElement('div');
             postEl.className = 'post';
@@ -696,16 +531,12 @@
             const text = Formatters.formatText(post.text);
             
             let mediaHTML = '';
-            let isVideo = false;
-            
             if (post.media_url) {
-                isVideo = this.isVideoType(post.media_url, post.media_type);
-                mediaHTML = this.renderMedia(post.media_url, post.media_type);
+                mediaHTML = this.renderMedia(post.media_url, post.media_type, true);
             } else if (post.has_media) {
                 if (State.mediaCache.has(post.message_id)) {
                     const mediaInfo = State.mediaCache.get(post.message_id);
-                    isVideo = this.isVideoType(mediaInfo.url, mediaInfo.file_type || post.media_type);
-                    mediaHTML = this.renderMedia(mediaInfo.url, mediaInfo.file_type || post.media_type);
+                    mediaHTML = this.renderMedia(mediaInfo.url, mediaInfo.file_type || post.media_type, true);
                 } else if (State.mediaErrorCache.has(post.message_id)) {
                     mediaHTML = '<div class="media-unavailable">📷 Медиа недоступно</div>';
                 } else {
@@ -738,24 +569,49 @@
                 </div>
             `;
             
-            if (isVideo) {
-                setTimeout(() => {
-                    VideoManager.initVideo(postEl, post.message_id, post.media_url || State.mediaCache.get(post.message_id)?.url);
-                }, 0);
-            }
-            
             const mediaContainer = postEl.querySelector('.media-container');
             if (mediaContainer) {
                 mediaContainer.addEventListener('click', () => {
-                    const url = post.media_url || State.mediaCache.get(post.message_id)?.url;
-                    const type = post.media_type || State.mediaCache.get(post.message_id)?.file_type;
-                    if (url) {
-                        Lightbox.open(url, type);
-                    }
+                    Lightbox.open(post.media_url || State.mediaCache.get(post.message_id)?.url, post.media_type);
                 });
             }
             
             return postEl;
+        },
+
+        renderMedia(url, type, forceSquare = true) {
+            if (!url) return '';
+            
+            const fullUrl = url.startsWith('http') ? url : `${CONFIG.API_BASE}${url}`;
+            
+            let isVideo = false;
+            if (type) {
+                const typeStr = String(type).toLowerCase();
+                isVideo = typeStr.includes('video') || typeStr.includes('document') || 
+                         typeStr.includes('animation') || typeStr === 'messagemediadocument' || 
+                         typeStr.includes('gif') || typeStr.includes('mp4');
+            } else if (fullUrl.match(/\.(mp4|webm|mov|gif)$/i)) {
+                isVideo = true;
+            }
+            
+            const squareStyle = forceSquare ? 'aspect-ratio: 1 / 1; width: 100%; object-fit: contain; background: #000;' : 'width: 100%; max-height: 500px; object-fit: contain; background: #000;';
+            
+            if (isVideo) {
+                return `
+                    <div class="media-container" style="aspect-ratio: 1 / 1; background: #000;">
+                        <video src="${fullUrl}" controls preload="metadata" playsinline style="width: 100%; height: 100%; object-fit: contain;">
+                            Ваш браузер не поддерживает видео.
+                        </video>
+                    </div>
+                `;
+            } else {
+                return `
+                    <div class="media-container" style="aspect-ratio: 1 / 1; background: #000;">
+                        <img src="${fullUrl}" alt="Media" loading="lazy" decoding="async" style="width: 100%; height: 100%; object-fit: contain;"
+                            onerror="this.onerror=null; this.parentElement.innerHTML='<div class=\\'media-error\\' style=\\'height:100%; display:flex; align-items:center; justify-content:center;\\'>📷 Ошибка загрузки</div>';">
+                    </div>
+                `;
+            }
         },
 
         async loadPostMedia(messageId) {
@@ -769,11 +625,9 @@
             }
             
             if (State.mediaErrorCache.has(messageId)) {
-                this.updatePostMediaUnavailable(messageId);
-                return;
-            }
-            
-            if (State.mediaLoading.has(messageId)) {
+                if (State.visiblePosts.has(messageId)) {
+                    this.updatePostMediaUnavailable(messageId);
+                }
                 return;
             }
             
@@ -784,83 +638,47 @@
                 post.media_type = mediaInfo.file_type || post.media_type;
                 State.posts.set(messageId, post);
                 
-                const postEl = document.querySelector(`.post[data-message-id="${messageId}"]`);
-                if (postEl) {
-                    this.updatePostMedia(messageId, mediaInfo.url, post.media_type);
+                if (State.visiblePosts.has(messageId)) {
+                    this.updatePost(messageId, {
+                        media_url: mediaInfo.url,
+                        media_type: post.media_type
+                    });
                 }
+            } else {
+                API.pollMedia(messageId, (url, failed) => {
+                    if (url) {
+                        post.media_url = url;
+                        State.posts.set(messageId, post);
+                        if (State.visiblePosts.has(messageId)) {
+                            this.updatePost(messageId, { media_url: url });
+                        }
+                    } else if (failed) {
+                        State.mediaErrorCache.add(messageId);
+                        if (State.visiblePosts.has(messageId)) {
+                            this.updatePostMediaUnavailable(messageId);
+                        }
+                    }
+                });
             }
         },
 
-        updatePostMedia(messageId, url, type) {
-            const postEl = document.querySelector(`.post[data-message-id="${messageId}"]`);
-            if (!postEl) return;
-            
-            const mediaContainer = postEl.querySelector('.media-container, .media-loading, .media-unavailable');
-            if (mediaContainer) {
-                const isVideo = this.isVideoType(url, type);
-                const newMedia = this.renderMedia(url, type);
-                
-                if (newMedia) {
-                    mediaContainer.outerHTML = newMedia;
-                    
-                    if (isVideo) {
-                        setTimeout(() => {
-                            VideoManager.initVideo(postEl, messageId, url);
-                        }, 0);
-                    }
-                    
-                    const newMediaContainer = postEl.querySelector('.media-container');
-                    if (newMediaContainer) {
-                        newMediaContainer.addEventListener('click', () => {
-                            Lightbox.open(url, type);
-                        });
-                    }
-                    
-                    postEl.dataset.mediaUrl = url;
-                    postEl.dataset.mediaType = type || '';
-                    
-                    setTimeout(() => {
-                        const height = postEl.offsetHeight;
-                        State.postHeights.set(messageId, height);
-                        VirtualList.rebuildOffsets();
-                    }, 100);
-                }
-            }
-        },
-
-        updatePostMediaUnavailable(messageId) {
-            const postEl = document.querySelector(`.post[data-message-id="${messageId}"]`);
-            if (!postEl) return;
-            
-            const mediaContainer = postEl.querySelector('.media-container, .media-loading');
-            if (mediaContainer) {
-                mediaContainer.outerHTML = '<div class="media-unavailable">📷 Медиа недоступно</div>';
-                
-                setTimeout(() => {
-                    const height = postEl.offsetHeight;
-                    State.postHeights.set(messageId, height);
-                    VirtualList.rebuildOffsets();
-                }, 100);
-            }
+        loadAllVisibleMedia() {
+            document.querySelectorAll('.post.visible').forEach(post => {
+                const messageId = Number(post.dataset.messageId);
+                this.loadPostMedia(messageId);
+            });
         },
 
         addNewPost(post) {
             State.posts.set(post.message_id, post);
             State.postOrder.unshift(post.message_id);
-            
-            let estimatedHeight = CONFIG.ESTIMATED_HEIGHT;
-            if (post.has_media) {
-                if (post.media_type && post.media_type.toLowerCase().includes('video')) {
-                    estimatedHeight = CONFIG.VIDEO_HEIGHT;
-                }
-            }
-            State.postHeights.set(post.message_id, estimatedHeight);
-            
+            State.postHeights.set(post.message_id, CONFIG.ESTIMATED_HEIGHT);
             VirtualList.rebuildOffsets();
+            
             VirtualList.render();
             
-            if (post.has_media && !post.media_url && !State.mediaErrorCache.has(post.message_id)) {
-                setTimeout(() => this.loadPostMedia(post.message_id), 200);
+            if (post.has_media && !post.media_url) {
+                setTimeout(() => this.loadPostMedia(post.message_id), 100);
             }
         },
 
@@ -868,56 +686,36 @@
             const post = State.posts.get(messageId);
             if (!post) return false;
             
-            let changed = false;
-            
-            if (data.text !== undefined) {
-                post.text = data.text;
-                changed = true;
-            }
-            
+            if (data.text !== undefined) post.text = data.text;
             if (data.media_url) {
                 post.media_url = data.media_url;
                 State.mediaCache.set(messageId, { url: data.media_url, file_type: data.media_type });
-                changed = true;
             }
-            
-            if (data.media_type) {
-                post.media_type = data.media_type;
-                changed = true;
-            }
-            
+            if (data.media_type) post.media_type = data.media_type;
             if (data.edit_date) {
                 post.is_edited = true;
                 post.edit_date = data.edit_date;
-                changed = true;
             }
             
             State.posts.set(messageId, post);
             
-            const postEl = document.querySelector(`.post[data-message-id="${messageId}"]`);
-            if (postEl) {
-                if (data.text !== undefined) {
-                    const textEl = postEl.querySelector('.post-text');
-                    if (textEl) textEl.innerHTML = Formatters.formatText(data.text || '');
-                }
-                
-                if (data.edit_date) {
-                    const dateEl = postEl.querySelector('.post-date');
-                    if (dateEl) {
-                        const dateText = Formatters.formatDate(data.edit_date);
-                        dateEl.innerHTML = `${dateText} <span class="edited-mark">(ред.)</span>`;
-                    }
-                }
-                
-                if (data.media_url) {
-                    this.updatePostMedia(messageId, data.media_url, data.media_type);
-                }
-                
-                postEl.classList.add('updated');
-                setTimeout(() => postEl.classList.remove('updated'), 2000);
+            if (State.visiblePosts.has(messageId)) {
+                VirtualList.render();
             }
             
             return true;
+        },
+
+        updatePostMediaUnavailable(messageId) {
+            const post = State.posts.get(messageId);
+            if (post) {
+                post.media_unavailable = true;
+                State.posts.set(messageId, post);
+                State.mediaErrorCache.add(messageId);
+                if (State.visiblePosts.has(messageId)) {
+                    VirtualList.render();
+                }
+            }
         },
 
         deletePost(messageId) {
@@ -925,7 +723,6 @@
             const index = State.postOrder.indexOf(messageId);
             if (index !== -1) State.postOrder.splice(index, 1);
             State.postHeights.delete(messageId);
-            VideoManager.cleanup(messageId);
             VirtualList.rebuildOffsets();
             VirtualList.render();
             API.cancelMediaPoll(messageId);
@@ -950,12 +747,10 @@
             const lightbox = document.getElementById('lightbox');
             const content = document.getElementById('lightboxContent');
             const fullUrl = url.startsWith('http') ? url : `${CONFIG.API_BASE}${url}`;
-            const isVideo = type && (type.toLowerCase().includes('video') || type === 'animation' || url.match(/\.(mp4|webm|mov)$/i));
-            
+            const isVideo = type === 'video' || type === 'Video' || url.match(/\.(mp4|webm|mov)$/i);
             content.innerHTML = isVideo
                 ? `<video src="${fullUrl}" controls autoplay playsinline style="max-width:100%; max-height:90vh;"></video>`
                 : `<img src="${fullUrl}" alt="Media" style="max-width:100%; max-height:90vh; object-fit:contain;">`;
-                
             lightbox.classList.add('active');
             document.body.style.overflow = 'hidden';
         },
@@ -977,6 +772,7 @@
                 State.postHeights.clear();
                 State.offset = 0;
                 State.hasMore = true;
+                State.initialMediaLoaded = false;
                 VirtualList.feed.innerHTML = '';
                 VirtualList.feed.appendChild(VirtualList.topSpacer);
                 VirtualList.feed.appendChild(VirtualList.bottomSpacer);
@@ -997,35 +793,23 @@
                     State.hasMore = data.hasMore !== false;
                     State.offset += data.messages.length;
                     
-                    const newPosts = [];
+                    const newMessages = [];
                     data.messages.forEach(post => {
                         if (!State.posts.has(post.message_id)) {
                             State.posts.set(post.message_id, post);
                             State.postOrder.push(post.message_id);
-                            
-                            let estimatedHeight = CONFIG.ESTIMATED_HEIGHT;
-                            if (post.has_media) {
-                                if (post.media_type && post.media_type.toLowerCase().includes('video')) {
-                                    estimatedHeight = CONFIG.VIDEO_HEIGHT;
-                                }
-                            }
-                            State.postHeights.set(post.message_id, estimatedHeight);
-                            newPosts.push(post);
+                            State.postHeights.set(post.message_id, CONFIG.ESTIMATED_HEIGHT);
+                            newMessages.push(post);
                         }
                     });
                     
                     VirtualList.rebuildOffsets();
                     VirtualList.render();
                     
-                    if (newPosts.length > 0) {
-                        setTimeout(() => {
-                            newPosts.forEach(post => {
-                                if (post.has_media && !post.media_url && !State.mediaErrorCache.has(post.message_id)) {
-                                    UI.loadPostMedia(post.message_id);
-                                }
-                            });
-                        }, 300);
-                    }
+                    setTimeout(() => {
+                        UI.loadAllVisibleMedia();
+                        State.initialMediaLoaded = true;
+                    }, 500);
                 } else {
                     State.hasMore = false;
                 }
@@ -1114,6 +898,9 @@
             
             const hasMedia = !!(data.media_type || data.media_url);
             let mediaType = data.media_type;
+            if (!mediaType && data.media_url) {
+                mediaType = data.media_url.match(/\.(mp4|webm|mov)$/i) ? 'video' : 'photo';
+            }
             
             const post = {
                 message_id: data.message_id,
@@ -1129,9 +916,7 @@
             State.newPosts.push(post);
             UI.updateNewPostsBadge();
             
-            if (window.scrollY < 200) {
-                this.flushNewPosts();
-            }
+            WebSocketManager.flushNewPosts();
         },
         handleEditMessage(data) {
             UI.updatePost(data.message_id, {
@@ -1170,11 +955,12 @@
             if (window.scrollY < 200 && State.newPosts.length > 0) {
                 WebSocketManager.flushNewPosts();
             }
+            
+            VirtualList.throttledRender();
         },
         throttledHandle: throttle(function() {
             ScrollHandler.handle();
-            VirtualList.throttledRender();
-        }, 16),
+        }, 100),
         debouncedLoadMore: debounce(() => {
             if (!State.isLoading && State.hasMore) {
                 MessageLoader.loadMessages();
@@ -1194,13 +980,8 @@
             const container = e.target.closest('.media-container');
             if (container) {
                 const post = container.closest('.post');
-                if (post) {
-                    const messageId = Number(post.dataset.messageId);
-                    const mediaUrl = post.dataset.mediaUrl || State.mediaCache.get(messageId)?.url;
-                    const mediaType = post.dataset.mediaType || State.mediaCache.get(messageId)?.file_type;
-                    if (mediaUrl) {
-                        Lightbox.open(mediaUrl, mediaType);
-                    }
+                if (post && post.dataset.mediaUrl) {
+                    Lightbox.open(post.dataset.mediaUrl, post.dataset.mediaType);
                 }
             }
         });
