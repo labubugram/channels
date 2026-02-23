@@ -205,48 +205,57 @@
         },
         async fetchMedia(messageId) {
             if (!Security.validateMessageId(messageId)) return null;
-            if (State.mediaErrorCache.has(messageId)) return null;
-            if (State.mediaCache.has(messageId)) return State.mediaCache.get(messageId);
-            if (State.mediaPollingQueue.has(messageId)) {
-                const { attempts } = State.mediaPollingQueue.get(messageId);
-                if (attempts >= CONFIG.MAX_MEDIA_POLL_ATTEMPTS) {
+            
+            if (State.mediaErrorCache.has(messageId)) {
+                return null;
+            }
+            
+            if (State.mediaCache.has(messageId)) {
+                return State.mediaCache.get(messageId);
+            }
+            
+            try {
+                const url = `${CONFIG.API_BASE}/api/media/by-message/${messageId}?channel_id=${CONFIG.CHANNEL_ID}`;
+                const response = await fetch(url);
+                
+                if (response.status === 404) {
                     State.mediaErrorCache.add(messageId);
-                    State.mediaPollingQueue.delete(messageId);
                     return null;
                 }
-            }
-            try {
-                const response = await fetch(`${CONFIG.API_BASE}/api/media/by-message/${messageId}?channel_id=${CONFIG.CHANNEL_ID}`);
+                
                 if (!response.ok) {
-                    if (response.status === 404) return null;
                     throw new Error(`HTTP ${response.status}`);
                 }
+                
                 const data = await response.json();
+                
                 if (data && data.url) {
                     State.mediaCache.set(messageId, data);
-                    if (State.mediaPollingQueue.has(messageId)) {
-                        const { timeoutId } = State.mediaPollingQueue.get(messageId);
-                        if (timeoutId) clearTimeout(timeoutId);
-                        State.mediaPollingQueue.delete(messageId);
-                    }
                     return data;
                 }
-            } catch (err) {}
-            return null;
+                
+                return null;
+            } catch (err) {
+                return null;
+            }
         },
         pollMedia(messageId, callback, maxAttempts = CONFIG.MAX_MEDIA_POLL_ATTEMPTS) {
-            if (State.mediaPollingQueue.has(messageId) || State.mediaErrorCache.has(messageId)) return;
+            if (State.mediaPollingQueue.has(messageId) || State.mediaErrorCache.has(messageId)) {
+                return;
+            }
+            
             const poll = (attempt) => {
                 if (attempt > maxAttempts) {
+                    State.mediaErrorCache.add(messageId);
                     if (State.mediaPollingQueue.has(messageId)) {
                         const { timeoutId } = State.mediaPollingQueue.get(messageId);
                         if (timeoutId) clearTimeout(timeoutId);
                         State.mediaPollingQueue.delete(messageId);
                     }
-                    State.mediaErrorCache.add(messageId);
                     callback(null, true);
                     return;
                 }
+                
                 API.fetchMedia(messageId).then(mediaInfo => {
                     if (mediaInfo && mediaInfo.url) {
                         State.mediaCache.set(messageId, mediaInfo);
@@ -257,10 +266,6 @@
                         }
                         callback(mediaInfo.url, false);
                     } else {
-                        if (State.mediaPollingQueue.has(messageId)) {
-                            const { timeoutId } = State.mediaPollingQueue.get(messageId);
-                            if (timeoutId) clearTimeout(timeoutId);
-                        }
                         const timeoutId = setTimeout(() => poll(attempt + 1), CONFIG.MEDIA_POLL_INTERVAL);
                         State.mediaPollingQueue.set(messageId, { attempts: attempt, timeoutId });
                     }
@@ -269,6 +274,7 @@
                     State.mediaPollingQueue.set(messageId, { attempts: attempt, timeoutId });
                 });
             };
+            
             poll(1);
         },
         cancelMediaPoll(messageId) {
@@ -373,7 +379,7 @@
                     if (entry.isIntersecting) {
                         const postId = Number(entry.target.dataset.messageId);
                         State.visiblePosts.add(postId);
-                        UI.loadPostMedia(postId);
+                        setTimeout(() => UI.loadPostMedia(postId), 100);
                     } else {
                         const postId = Number(entry.target.dataset.messageId);
                         State.visiblePosts.delete(postId);
@@ -527,9 +533,14 @@
             if (post.media_url) {
                 mediaHTML = this.renderMedia(post.media_url, post.media_type);
             } else if (post.has_media) {
-                mediaHTML = post.media_unavailable
-                    ? '<div class="media-unavailable">📷 Медиа недоступно</div>'
-                    : '<div class="media-loading">📷 Загрузка медиа...</div>';
+                if (State.mediaCache.has(post.message_id)) {
+                    const mediaInfo = State.mediaCache.get(post.message_id);
+                    mediaHTML = this.renderMedia(mediaInfo.url, mediaInfo.file_type || post.media_type);
+                } else if (State.mediaErrorCache.has(post.message_id)) {
+                    mediaHTML = '<div class="media-unavailable">📷 Медиа недоступно</div>';
+                } else {
+                    mediaHTML = '<div class="media-loading">📷 Загрузка медиа...</div>';
+                }
             }
             
             postEl.innerHTML = `
@@ -569,7 +580,9 @@
 
         renderMedia(url, type) {
             if (!url) return '';
+            
             const fullUrl = url.startsWith('http') ? url : `${CONFIG.API_BASE}${url}`;
+            
             let isVideo = false;
             if (type) {
                 const typeStr = String(type).toLowerCase();
@@ -579,6 +592,7 @@
             } else if (fullUrl.match(/\.(mp4|webm|mov|gif)$/i)) {
                 isVideo = true;
             }
+            
             if (isVideo) {
                 return `
                     <div class="media-container">
@@ -597,29 +611,46 @@
             }
         },
 
-        loadPostMedia(messageId) {
+        async loadPostMedia(messageId) {
             const post = State.posts.get(messageId);
-            if (!post || !post.has_media || post.media_url) return;
+            if (!post || !post.has_media || post.media_url) {
+                return;
+            }
             
-            API.fetchMedia(messageId).then(mediaInfo => {
-                if (mediaInfo && mediaInfo.url) {
-                    post.media_url = mediaInfo.url;
-                    post.media_type = mediaInfo.file_type || post.media_type;
+            if (State.mediaErrorCache.has(messageId)) {
+                this.updatePostMediaUnavailable(messageId);
+                return;
+            }
+            
+            const mediaInfo = await API.fetchMedia(messageId);
+            
+            if (mediaInfo && mediaInfo.url) {
+                post.media_url = mediaInfo.url;
+                post.media_type = mediaInfo.file_type || post.media_type;
+                State.posts.set(messageId, post);
+                
+                if (State.visiblePosts.has(messageId)) {
                     this.updatePost(messageId, {
                         media_url: mediaInfo.url,
                         media_type: post.media_type
                     });
                 }
-            }).catch(() => {
+            } else {
                 API.pollMedia(messageId, (url, failed) => {
                     if (url) {
                         post.media_url = url;
-                        this.updatePost(messageId, { media_url: url });
+                        State.posts.set(messageId, post);
+                        if (State.visiblePosts.has(messageId)) {
+                            this.updatePost(messageId, { media_url: url });
+                        }
                     } else if (failed) {
-                        this.updatePostMediaUnavailable(messageId);
+                        State.mediaErrorCache.add(messageId);
+                        if (State.visiblePosts.has(messageId)) {
+                            this.updatePostMediaUnavailable(messageId);
+                        }
                     }
                 });
-            });
+            }
         },
 
         addNewPost(post) {
@@ -631,7 +662,7 @@
             if (window.scrollY < 200) {
                 VirtualList.render();
                 if (post.has_media && !post.media_url) {
-                    this.loadPostMedia(post.message_id);
+                    setTimeout(() => this.loadPostMedia(post.message_id), 200);
                 }
             }
         },
@@ -641,7 +672,10 @@
             if (!post) return false;
             
             if (data.text !== undefined) post.text = data.text;
-            if (data.media_url) post.media_url = data.media_url;
+            if (data.media_url) {
+                post.media_url = data.media_url;
+                State.mediaCache.set(messageId, { url: data.media_url, file_type: data.media_type });
+            }
             if (data.media_type) post.media_type = data.media_type;
             if (data.edit_date) {
                 post.is_edited = true;
@@ -662,6 +696,7 @@
             if (post) {
                 post.media_unavailable = true;
                 State.posts.set(messageId, post);
+                State.mediaErrorCache.add(messageId);
                 if (State.visiblePosts.has(messageId)) {
                     VirtualList.render();
                 }
@@ -742,16 +777,24 @@
                     State.hasMore = data.hasMore !== false;
                     State.offset += data.messages.length;
                     
+                    const newMessages = [];
                     data.messages.forEach(post => {
                         if (!State.posts.has(post.message_id)) {
                             State.posts.set(post.message_id, post);
                             State.postOrder.push(post.message_id);
                             State.postHeights.set(post.message_id, CONFIG.ESTIMATED_HEIGHT);
+                            newMessages.push(post);
                         }
                     });
                     
                     VirtualList.rebuildOffsets();
                     VirtualList.render();
+                    
+                    newMessages.forEach(post => {
+                        if (post.has_media) {
+                            setTimeout(() => UI.loadPostMedia(post.message_id), 300);
+                        }
+                    });
                 } else {
                     State.hasMore = false;
                 }
@@ -862,20 +905,14 @@
                 WebSocketManager.flushNewPosts();
             } else {
                 if (hasMedia && !data.media_url) {
-                    API.fetchMedia(data.message_id).then(mediaInfo => {
-                        if (mediaInfo && mediaInfo.url) {
-                            post.media_url = mediaInfo.url;
-                            post.media_type = mediaInfo.file_type || post.media_type;
-                        } else {
-                            API.pollMedia(data.message_id, (url, failed) => {
-                                if (url) {
-                                    post.media_url = url;
-                                } else if (failed) {
-                                    post.media_unavailable = true;
-                                }
-                            });
-                        }
-                    });
+                    setTimeout(() => {
+                        API.fetchMedia(data.message_id).then(mediaInfo => {
+                            if (mediaInfo && mediaInfo.url) {
+                                post.media_url = mediaInfo.url;
+                                post.media_type = mediaInfo.file_type || post.media_type;
+                            }
+                        });
+                    }, 500);
                 }
             }
         },
