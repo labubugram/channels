@@ -14,7 +14,7 @@
         MAX_MEDIA_POLL_ATTEMPTS: 12,
         DEDUP_TTL: 5000,
         BUFFER: 6,
-        ESTIMATED_HEIGHT: 300,
+        ESTIMATED_HEIGHT: 200,
         LAZY_LOAD_OFFSET: 500,
         WS_BASE: (() => {
             const apiBase = document.querySelector('meta[name="mirror:api-base"]')?.content || 'https://0808.us.nekhebet.su:8081';
@@ -44,8 +44,7 @@
         totalHeight: 0,
         visiblePosts: new Set(),
         isTransitioning: false,
-        pendingTheme: null,
-        initialMediaLoaded: false
+        pendingTheme: null
     };
 
     const Security = {
@@ -380,7 +379,7 @@
                     if (entry.isIntersecting) {
                         const postId = Number(entry.target.dataset.messageId);
                         State.visiblePosts.add(postId);
-                        UI.loadPostMedia(postId);
+                        setTimeout(() => UI.loadPostMedia(postId), 100);
                     } else {
                         const postId = Number(entry.target.dataset.messageId);
                         State.visiblePosts.delete(postId);
@@ -532,11 +531,11 @@
             
             let mediaHTML = '';
             if (post.media_url) {
-                mediaHTML = this.renderMedia(post.media_url, post.media_type, true);
+                mediaHTML = this.renderMedia(post.media_url, post.media_type);
             } else if (post.has_media) {
                 if (State.mediaCache.has(post.message_id)) {
                     const mediaInfo = State.mediaCache.get(post.message_id);
-                    mediaHTML = this.renderMedia(mediaInfo.url, mediaInfo.file_type || post.media_type, true);
+                    mediaHTML = this.renderMedia(mediaInfo.url, mediaInfo.file_type || post.media_type);
                 } else if (State.mediaErrorCache.has(post.message_id)) {
                     mediaHTML = '<div class="media-unavailable">📷 Медиа недоступно</div>';
                 } else {
@@ -572,14 +571,14 @@
             const mediaContainer = postEl.querySelector('.media-container');
             if (mediaContainer) {
                 mediaContainer.addEventListener('click', () => {
-                    Lightbox.open(post.media_url || State.mediaCache.get(post.message_id)?.url, post.media_type);
+                    Lightbox.open(post.media_url, post.media_type);
                 });
             }
             
             return postEl;
         },
 
-        renderMedia(url, type, forceSquare = true) {
+        renderMedia(url, type) {
             if (!url) return '';
             
             const fullUrl = url.startsWith('http') ? url : `${CONFIG.API_BASE}${url}`;
@@ -594,21 +593,19 @@
                 isVideo = true;
             }
             
-            const squareStyle = forceSquare ? 'aspect-ratio: 1 / 1; width: 100%; object-fit: contain; background: #000;' : 'width: 100%; max-height: 500px; object-fit: contain; background: #000;';
-            
             if (isVideo) {
                 return `
-                    <div class="media-container" style="aspect-ratio: 1 / 1; background: #000;">
-                        <video src="${fullUrl}" controls preload="metadata" playsinline style="width: 100%; height: 100%; object-fit: contain;">
+                    <div class="media-container">
+                        <video src="${fullUrl}" controls preload="metadata" playsinline>
                             Ваш браузер не поддерживает видео.
                         </video>
                     </div>
                 `;
             } else {
                 return `
-                    <div class="media-container" style="aspect-ratio: 1 / 1; background: #000;">
-                        <img src="${fullUrl}" alt="Media" loading="lazy" decoding="async" style="width: 100%; height: 100%; object-fit: contain;"
-                            onerror="this.onerror=null; this.parentElement.innerHTML='<div class=\\'media-error\\' style=\\'height:100%; display:flex; align-items:center; justify-content:center;\\'>📷 Ошибка загрузки</div>';">
+                    <div class="media-container">
+                        <img src="${fullUrl}" alt="Media" loading="lazy" decoding="async"
+                            onerror="this.onerror=null; this.parentElement.innerHTML='<div class=\\'media-error\\'>📷 Ошибка загрузки</div>';">
                     </div>
                 `;
             }
@@ -616,18 +613,12 @@
 
         async loadPostMedia(messageId) {
             const post = State.posts.get(messageId);
-            if (!post || !post.has_media) {
-                return;
-            }
-            
-            if (post.media_url) {
+            if (!post || !post.has_media || post.media_url) {
                 return;
             }
             
             if (State.mediaErrorCache.has(messageId)) {
-                if (State.visiblePosts.has(messageId)) {
-                    this.updatePostMediaUnavailable(messageId);
-                }
+                this.updatePostMediaUnavailable(messageId);
                 return;
             }
             
@@ -662,23 +653,17 @@
             }
         },
 
-        loadAllVisibleMedia() {
-            document.querySelectorAll('.post.visible').forEach(post => {
-                const messageId = Number(post.dataset.messageId);
-                this.loadPostMedia(messageId);
-            });
-        },
-
         addNewPost(post) {
             State.posts.set(post.message_id, post);
             State.postOrder.unshift(post.message_id);
             State.postHeights.set(post.message_id, CONFIG.ESTIMATED_HEIGHT);
             VirtualList.rebuildOffsets();
             
-            VirtualList.render();
-            
-            if (post.has_media && !post.media_url) {
-                setTimeout(() => this.loadPostMedia(post.message_id), 100);
+            if (window.scrollY < 200) {
+                VirtualList.render();
+                if (post.has_media && !post.media_url) {
+                    setTimeout(() => this.loadPostMedia(post.message_id), 200);
+                }
             }
         },
 
@@ -749,8 +734,8 @@
             const fullUrl = url.startsWith('http') ? url : `${CONFIG.API_BASE}${url}`;
             const isVideo = type === 'video' || type === 'Video' || url.match(/\.(mp4|webm|mov)$/i);
             content.innerHTML = isVideo
-                ? `<video src="${fullUrl}" controls autoplay playsinline style="max-width:100%; max-height:90vh;"></video>`
-                : `<img src="${fullUrl}" alt="Media" style="max-width:100%; max-height:90vh; object-fit:contain;">`;
+                ? `<video src="${fullUrl}" controls autoplay playsinline></video>`
+                : `<img src="${fullUrl}" alt="Media">`;
             lightbox.classList.add('active');
             document.body.style.overflow = 'hidden';
         },
@@ -772,7 +757,6 @@
                 State.postHeights.clear();
                 State.offset = 0;
                 State.hasMore = true;
-                State.initialMediaLoaded = false;
                 VirtualList.feed.innerHTML = '';
                 VirtualList.feed.appendChild(VirtualList.topSpacer);
                 VirtualList.feed.appendChild(VirtualList.bottomSpacer);
@@ -806,10 +790,11 @@
                     VirtualList.rebuildOffsets();
                     VirtualList.render();
                     
-                    setTimeout(() => {
-                        UI.loadAllVisibleMedia();
-                        State.initialMediaLoaded = true;
-                    }, 500);
+                    newMessages.forEach(post => {
+                        if (post.has_media) {
+                            setTimeout(() => UI.loadPostMedia(post.message_id), 300);
+                        }
+                    });
                 } else {
                     State.hasMore = false;
                 }
@@ -916,7 +901,20 @@
             State.newPosts.push(post);
             UI.updateNewPostsBadge();
             
-            WebSocketManager.flushNewPosts();
+            if (window.scrollY < 200) {
+                WebSocketManager.flushNewPosts();
+            } else {
+                if (hasMedia && !data.media_url) {
+                    setTimeout(() => {
+                        API.fetchMedia(data.message_id).then(mediaInfo => {
+                            if (mediaInfo && mediaInfo.url) {
+                                post.media_url = mediaInfo.url;
+                                post.media_type = mediaInfo.file_type || post.media_type;
+                            }
+                        });
+                    }, 500);
+                }
+            }
         },
         handleEditMessage(data) {
             UI.updatePost(data.message_id, {
@@ -938,6 +936,7 @@
             }
             
             UI.updateNewPostsBadge();
+            VirtualList.render();
         }
     };
 
