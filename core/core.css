@@ -279,10 +279,39 @@ body {
 .feed {
     max-width: 800px;
     margin: 0 auto;
+    height: calc(100vh - 180px);
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    scroll-behavior: smooth;
+    position: relative;
     padding: 8px 10px 20px;
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
+    contain: layout style paint;
+}
+
+.feed::-webkit-scrollbar {
+    width: 4px;
+}
+
+.feed::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+.feed::-webkit-scrollbar-thumb {
+    background: var(--text-meta);
+    border-radius: 4px;
+}
+
+.virtual-container {
+    position: relative;
+    width: 100%;
+    will-change: transform;
+}
+
+.virtual-post {
+    position: absolute;
+    left: 0;
+    right: 0;
+    will-change: transform;
     contain: layout style paint;
 }
 
@@ -290,10 +319,12 @@ body {
     background: var(--surface);
     border-radius: var(--card-radius);
     overflow: hidden;
-    transition: all 0.4s cubic-bezier(0.23, 1, 0.32, 1);
+    transition: opacity 0.3s ease, transform 0.3s ease, background-color 0.3s ease;
     opacity: 0;
     transform: translateY(20px);
-    will-change: transform, opacity, background-color;
+    border: 1px solid var(--border);
+    margin-bottom: 12px;
+    width: 100%;
 }
 
 .post.visible {
@@ -306,7 +337,7 @@ body {
 }
 
 @keyframes newPostHighlight {
-    0%   { background: var(--new-post-bg); }
+    0% { background: var(--new-post-bg); }
     100% { background: var(--surface); }
 }
 
@@ -428,6 +459,18 @@ body {
 
 .media-container video {
     background: #000;
+}
+
+.media-placeholder {
+    height: 200px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--bg-secondary);
+    color: var(--text-secondary);
+    font-size: 24px;
+    border-radius: var(--media-radius);
+    border: 1px dashed var(--border);
 }
 
 .media-loading {
@@ -718,12 +761,25 @@ body {
 }
 
 .infinite-scroll-trigger {
-    height: 20px;
-    margin: 10px 0 20px;
+    position: sticky;
+    bottom: 10px;
+    height: 40px;
+    margin: 10px 0;
     text-align: center;
     color: var(--text-secondary);
     font-size: 13px;
-    transition: color var(--transition-duration) ease;
+    background: var(--surface);
+    border-radius: 20px;
+    line-height: 40px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+    backdrop-filter: blur(10px);
+    opacity: 0.9;
+    transition: color var(--transition-duration) ease, opacity 0.3s ease;
+    z-index: 10;
+}
+
+.infinite-scroll-trigger:hover {
+    opacity: 1;
 }
 
 .skeleton {
@@ -736,6 +792,7 @@ body {
     border-radius: var(--card-radius);
     height: 200px;
     margin-bottom: 12px;
+    border: 1px solid var(--border);
 }
 
 @keyframes loading {
@@ -760,6 +817,7 @@ body {
     animation: slideUp 0.3s ease;
     max-width: 90%;
     transition: all var(--transition-duration) ease;
+    backdrop-filter: blur(10px);
 }
 
 .toast.info { border-left: 4px solid var(--accent); }
@@ -787,7 +845,8 @@ body {
 .tg-header,
 .post,
 .media-container,
-.toast {
+.toast,
+.infinite-scroll-trigger {
     transition: all 0.35s cubic-bezier(0.4, 0, 0.2, 1) !important;
 }
 
@@ -804,6 +863,9 @@ body {
     .new-posts-badge {
         padding: 12px 12px;
         font-size: 12px;
+    }
+    .feed {
+        height: calc(100vh - 160px);
     }
     :root {
         --status-dot-size: 8px;
