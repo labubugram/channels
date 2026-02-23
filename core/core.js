@@ -10,10 +10,11 @@
         INITIAL_LIMIT: 20,
         MAX_RECONNECT_ATTEMPTS: 10,
         RECONNECT_BASE_DELAY: 1000,
-        MEDIA_RETRY_ATTEMPTS: 3,
         MEDIA_POLL_INTERVAL: 5000,
         MAX_MEDIA_POLL_ATTEMPTS: 12,
         MAX_VISIBLE_POSTS: 100,
+        LAZY_LOAD_OFFSET: 500,
+        IMAGE_UNLOAD_DISTANCE: 1000,
         DEDUP_TTL: 5000,
         WS_BASE: (() => {
             const apiBase = document.querySelector('meta[name="mirror:api-base"]')?.content || 'https://0808.us.nekhebet.su:8081';
@@ -37,7 +38,12 @@
         scrollTimeout: null,
         recentMessages: new Map(),
         lastDocumentHeight: 0,
-        theme: localStorage.getItem('theme') || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
+        theme: localStorage.getItem('theme') || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'),
+        visiblePosts: new Set(),
+        isTransitioning: false,
+        pendingTheme: null,
+        wsMessageQueue: [],
+        wsProcessing: false
     };
 
     const Security = {
@@ -152,6 +158,36 @@
         }
     };
 
+    const debounce = (fn, delay, options = {}) => {
+        let timeoutId;
+        let lastCall = 0;
+        return function(...args) {
+            const now = Date.now();
+            if (options.leading && now - lastCall > delay) {
+                fn.apply(this, args);
+                lastCall = now;
+            }
+            clearTimeout(timeoutId);
+            timeoutId = setTimeout(() => {
+                if (!options.leading || Date.now() - lastCall > delay) {
+                    fn.apply(this, args);
+                }
+                timeoutId = null;
+            }, delay);
+        };
+    };
+
+    const throttle = (fn, limit) => {
+        let inThrottle;
+        return function(...args) {
+            if (!inThrottle) {
+                fn.apply(this, args);
+                inThrottle = true;
+                setTimeout(() => inThrottle = false, limit);
+            }
+        };
+    };
+
     const API = {
         async fetchMessages(offset = 0, limit = CONFIG.INITIAL_LIMIT) {
             try {
@@ -240,6 +276,13 @@
                 if (timeoutId) clearTimeout(timeoutId);
                 State.mediaPollingQueue.delete(messageId);
             }
+        },
+        clearMediaCache() {
+            State.mediaCache.clear();
+            State.mediaErrorCache.clear();
+            State.mediaPollingQueue.forEach((_, msgId) => {
+                this.cancelMediaPoll(msgId);
+            });
         }
     };
 
@@ -248,62 +291,144 @@
         videoTimeoutId: null,
         init() {
             this.video = document.getElementById('bgVideo');
-            document.documentElement.setAttribute('data-theme', State.theme);
-            this.initVideo();
-            window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', (e) => {
-                if (!localStorage.getItem('theme')) {
-                    const theme = e.matches ? 'dark' : 'light';
-                    State.theme = theme;
-                    document.documentElement.setAttribute('data-theme', theme);
-                    this.scheduleVideo();
-                }
-            });
+            if (this.video) {
+                this.video.load();
+                window.addEventListener('load', () => this.scheduleVideo());
+                this.video.play().catch(() => {});
+            }
+            this.applyTheme(State.theme, false);
         },
-        initVideo() {
-            if (!this.video) return;
-            this.video.load();
-            window.addEventListener('load', () => this.scheduleVideo());
-            this.video.play().catch(() => {});
+        applyTheme(theme, animate = true) {
+            if (animate) {
+                document.documentElement.classList.add('theme-transitioning');
+            }
+            document.documentElement.setAttribute('data-theme', theme);
+            if (theme === 'dark') {
+                this.scheduleVideo();
+            } else {
+                this.hideVideo();
+            }
+            if (animate) {
+                setTimeout(() => {
+                    document.documentElement.classList.remove('theme-transitioning');
+                }, 400);
+            }
         },
         scheduleVideo() {
+            if (!this.video) return;
             if (this.videoTimeoutId) clearTimeout(this.videoTimeoutId);
-            if (State.theme === 'dark') {
-                this.videoTimeoutId = setTimeout(() => this.showVideo(), 10000);
-            }
+            this.videoTimeoutId = setTimeout(() => this.showVideo(), 10000);
         },
         showVideo() {
             if (this.video) this.video.classList.add('visible');
         },
         hideVideo() {
             if (this.video) this.video.classList.remove('visible');
+            if (this.videoTimeoutId) {
+                clearTimeout(this.videoTimeoutId);
+                this.videoTimeoutId = null;
+            }
         },
         toggle() {
+            if (State.isTransitioning) {
+                State.pendingTheme = State.theme === 'dark' ? 'light' : 'dark';
+                return;
+            }
+            State.isTransitioning = true;
+            if (this.videoTimeoutId) {
+                clearTimeout(this.videoTimeoutId);
+                this.videoTimeoutId = null;
+            }
             const newTheme = State.theme === 'dark' ? 'light' : 'dark';
-            document.documentElement.classList.add('theme-transitioning');
             requestAnimationFrame(() => {
                 State.theme = newTheme;
-                document.documentElement.setAttribute('data-theme', newTheme);
                 localStorage.setItem('theme', newTheme);
-                if (newTheme === 'dark') {
-                    this.scheduleVideo();
-                } else {
-                    if (this.videoTimeoutId) {
-                        clearTimeout(this.videoTimeoutId);
-                        this.videoTimeoutId = null;
-                    }
-                    this.hideVideo();
+                this.applyTheme(newTheme, true);
+                State.isTransitioning = false;
+                if (State.pendingTheme) {
+                    const temp = State.pendingTheme;
+                    State.pendingTheme = null;
+                    State.theme = temp;
+                    this.toggle();
                 }
-                setTimeout(() => document.documentElement.classList.remove('theme-transitioning'), 400);
             });
         }
     };
 
     const UI = {
+        observer: null,
+        initIntersectionObserver() {
+            if (this.observer) {
+                this.observer.disconnect();
+            }
+            this.observer = new IntersectionObserver((entries) => {
+                entries.forEach(entry => {
+                    const post = entry.target;
+                    const msgId = Number(post.dataset.messageId);
+                    if (entry.isIntersecting) {
+                        State.visiblePosts.add(msgId);
+                        this.loadPostMedia(msgId);
+                    } else {
+                        State.visiblePosts.delete(msgId);
+                        this.unloadPostMedia(msgId);
+                    }
+                });
+            }, {
+                rootMargin: `${CONFIG.LAZY_LOAD_OFFSET}px`,
+                threshold: 0.01
+            });
+            document.querySelectorAll('.post').forEach(post => {
+                this.observer.observe(post);
+            });
+        },
+        loadPostMedia(messageId) {
+            const post = State.posts.get(messageId);
+            if (!post || !post.has_media || post.media_url) return;
+            API.fetchMedia(messageId).then(mediaInfo => {
+                if (mediaInfo && mediaInfo.url) {
+                    post.media_url = mediaInfo.url;
+                    post.media_type = mediaInfo.file_type || post.media_type;
+                    this.updatePost(messageId, {
+                        media_url: mediaInfo.url,
+                        media_type: post.media_type
+                    });
+                }
+            });
+        },
+        unloadPostMedia(messageId) {
+            if (!CONFIG.IMAGE_UNLOAD_DISTANCE) return;
+            const postEl = document.querySelector(`.post[data-message-id="${messageId}"]`);
+            if (!postEl) return;
+            const rect = postEl.getBoundingClientRect();
+            const viewportHeight = window.innerHeight;
+            if (rect.top > viewportHeight + CONFIG.IMAGE_UNLOAD_DISTANCE || rect.bottom < -CONFIG.IMAGE_UNLOAD_DISTANCE) {
+                const mediaContainer = postEl.querySelector('.media-container');
+                if (mediaContainer) {
+                    const img = mediaContainer.querySelector('img');
+                    if (img) {
+                        img.src = '';
+                        img.srcset = '';
+                        mediaContainer.innerHTML = '<div class="media-placeholder">📷</div>';
+                    }
+                    const video = mediaContainer.querySelector('video');
+                    if (video) {
+                        video.pause();
+                        video.src = '';
+                        video.load();
+                    }
+                }
+            }
+        },
         trimOldPosts() {
             const posts = document.querySelectorAll('.post');
             if (posts.length > CONFIG.MAX_VISIBLE_POSTS) {
                 const toRemove = Array.from(posts).slice(0, posts.length - CONFIG.MAX_VISIBLE_POSTS);
-                toRemove.forEach(el => el.remove());
+                toRemove.forEach(el => {
+                    if (this.observer) {
+                        this.observer.unobserve(el);
+                    }
+                    el.remove();
+                });
             }
         },
         updateChannelInfo() {
@@ -311,7 +436,7 @@
             document.getElementById('channelUsername').textContent = `@${CONFIG.CHANNEL_USERNAME}`;
             const avatarEl = document.getElementById('channelAvatar');
             if (avatarEl) {
-                avatarEl.innerHTML = `<img src="nekhebet.svg" style="width:54px; height:54px; object-fit:cover;" alt="Channel avatar">`;
+                avatarEl.innerHTML = `<img src="nekhebet.svg" style="width:54px; height:54px; object-fit:cover;" alt="Channel avatar" loading="lazy">`;
             }
         },
         updateConnectionStatus(connected) {
@@ -361,7 +486,7 @@
                 <div class="post-content">
                     <div class="post-header">
                         <div class="post-avatar">
-                            <img src="nekhebet.svg" style="width:36px; height:36px; object-fit:cover;" alt="Channel avatar">
+                            <img src="nekhebet.svg" style="width:36px; height:36px; object-fit:cover;" alt="Channel avatar" loading="lazy">
                         </div>
                         <div class="post-author-info">
                             <div class="post-author-name">
@@ -424,6 +549,11 @@
             feed.querySelectorAll('.post').forEach(post => {
                 requestAnimationFrame(() => post.classList.add('visible'));
             });
+            if (this.observer) {
+                feed.querySelectorAll('.post').forEach(post => {
+                    this.observer.observe(post);
+                });
+            }
             this.trimOldPosts();
         },
         addPostToTop(post) {
@@ -438,6 +568,9 @@
                 postEl.classList.add('visible', 'new');
             });
             setTimeout(() => postEl.classList.remove('new'), 3000);
+            if (this.observer) {
+                this.observer.observe(postEl);
+            }
             this.trimOldPosts();
         },
         updatePost(messageId, data) {
@@ -494,6 +627,9 @@
         deletePost(messageId) {
             const postEl = document.querySelector(`.post[data-message-id="${messageId}"]`);
             if (!postEl) return false;
+            if (this.observer) {
+                this.observer.unobserve(postEl);
+            }
             postEl.classList.add('deleted');
             setTimeout(() => {
                 postEl.remove();
@@ -513,6 +649,13 @@
         showScrollTopButton(visible) {
             const btn = document.getElementById('scrollTopBtn');
             if (btn) btn.style.display = visible ? 'flex' : 'none';
+        },
+        cleanup() {
+            if (this.observer) {
+                this.observer.disconnect();
+                this.observer = null;
+            }
+            API.clearMediaCache();
         }
     };
 
@@ -541,11 +684,13 @@
         async loadMessages(reset = false) {
             if (State.isLoading) return;
             if (reset) {
+                UI.cleanup();
                 State.posts.clear();
                 State.postOrder = [];
                 document.getElementById('feed').innerHTML = '';
                 State.offset = 0;
                 State.hasMore = true;
+                API.clearMediaCache();
             }
             if (!State.hasMore) {
                 document.getElementById('infiniteScrollTrigger').style.display = 'none';
@@ -558,36 +703,17 @@
                 if (data.messages && data.messages.length > 0) {
                     State.hasMore = data.hasMore !== false;
                     State.offset += data.messages.length;
+                    const newMessages = [];
                     data.messages.forEach(post => {
                         if (!State.posts.has(post.message_id)) {
                             State.posts.set(post.message_id, post);
                             State.postOrder.push(post.message_id);
+                            newMessages.push(post);
                         }
                     });
-                    UI.renderPosts(data.messages);
-                    data.messages.forEach(post => {
-                        if (post.has_media) {
-                            API.fetchMedia(post.message_id).then(mediaInfo => {
-                                if (mediaInfo && mediaInfo.url) {
-                                    post.media_url = mediaInfo.url;
-                                    post.media_type = mediaInfo.file_type || post.media_type;
-                                    UI.updatePost(post.message_id, {
-                                        media_url: mediaInfo.url,
-                                        media_type: post.media_type
-                                    });
-                                } else {
-                                    API.pollMedia(post.message_id, (url, failed) => {
-                                        if (url) {
-                                            post.media_url = url;
-                                            UI.updatePost(post.message_id, { media_url: url });
-                                        } else if (failed) {
-                                            UI.updatePostMediaUnavailable(post.message_id);
-                                        }
-                                    });
-                                }
-                            });
-                        }
-                    });
+                    if (newMessages.length > 0) {
+                        UI.renderPosts(newMessages);
+                    }
                 } else {
                     State.hasMore = false;
                 }
@@ -600,6 +726,7 @@
         async loadInitial() {
             UI.showSkeletonLoaders();
             await this.loadMessages(true);
+            UI.initIntersectionObserver();
         }
     };
 
@@ -640,26 +767,8 @@
                     }, 30000);
                 };
                 State.ws.onmessage = (event) => {
-                    try {
-                        const data = JSON.parse(event.data);
-                        if (['ping', 'pong', 'welcome', 'heartbeat', 'buffering', 'flush_start', 'flush_complete'].includes(data.type)) return;
-                        if (data.channel_id !== parseInt(CONFIG.CHANNEL_ID)) return;
-                        const messageKey = `${data.channel_id}-${data.message_id}`;
-                        const lastReceived = State.recentMessages.get(messageKey);
-                        if (lastReceived && (Date.now() - lastReceived < CONFIG.DEDUP_TTL)) return;
-                        State.recentMessages.set(messageKey, Date.now());
-                        if (State.recentMessages.size > 100) {
-                            const now = Date.now();
-                            for (const [key, time] of State.recentMessages.entries()) {
-                                if (now - time > CONFIG.DEDUP_TTL) State.recentMessages.delete(key);
-                            }
-                        }
-                        switch (data.type) {
-                            case 'new': this.handleNewMessage(data); break;
-                            case 'edit': this.handleEditMessage(data); break;
-                            case 'delete': this.handleDeleteMessage(data); break;
-                        }
-                    } catch (err) {}
+                    State.wsMessageQueue.push(event.data);
+                    this.processQueue();
                 };
                 State.ws.onclose = () => {
                     State.wsConnected = false;
@@ -672,6 +781,34 @@
                 this.reconnect();
             }
         },
+        async processQueue() {
+            if (State.wsProcessing) return;
+            State.wsProcessing = true;
+            while (State.wsMessageQueue.length > 0) {
+                const data = JSON.parse(State.wsMessageQueue.shift());
+                await this.handleMessage(data);
+            }
+            State.wsProcessing = false;
+        },
+        async handleMessage(data) {
+            if (['ping', 'pong', 'welcome', 'heartbeat', 'buffering', 'flush_start', 'flush_complete'].includes(data.type)) return;
+            if (data.channel_id !== parseInt(CONFIG.CHANNEL_ID)) return;
+            const messageKey = `${data.channel_id}-${data.message_id}`;
+            const lastReceived = State.recentMessages.get(messageKey);
+            if (lastReceived && (Date.now() - lastReceived < CONFIG.DEDUP_TTL)) return;
+            State.recentMessages.set(messageKey, Date.now());
+            if (State.recentMessages.size > 100) {
+                const now = Date.now();
+                for (const [key, time] of State.recentMessages.entries()) {
+                    if (now - time > CONFIG.DEDUP_TTL) State.recentMessages.delete(key);
+                }
+            }
+            switch (data.type) {
+                case 'new': this.handleNewMessage(data); break;
+                case 'edit': this.handleEditMessage(data); break;
+                case 'delete': this.handleDeleteMessage(data); break;
+            }
+        },
         reconnect() {
             if (State.wsReconnectAttempts >= CONFIG.MAX_RECONNECT_ATTEMPTS) return;
             State.wsReconnectAttempts++;
@@ -682,53 +819,19 @@
         },
         handleNewMessage(data) {
             if (State.posts.has(data.message_id)) return;
-            const hasMedia = !!(data.media_type || data.media_url || data.has_media);
-            let mediaType = data.media_type || null;
-            if (!mediaType && data.media_url) {
-                mediaType = data.media_url.match(/\.(mp4|webm|mov)$/i) ? 'video' : 'photo';
-            }
             const post = {
                 message_id: data.message_id,
-                channel_id: data.channel_id,
                 text: data.text || '',
                 date: data.date || new Date().toISOString(),
                 views: data.views || 0,
-                has_media: hasMedia,
-                media_type: mediaType,
+                has_media: !!(data.media_type || data.media_url),
+                media_type: data.media_type,
                 media_url: data.media_url,
                 is_edited: false
             };
             State.newPosts.push(post);
             UI.updateNewPostsBadge();
             if (window.scrollY < 200) this.flushNewPosts();
-            if (hasMedia) {
-                if (data.media_url) {
-                    post.media_url = data.media_url;
-                } else {
-                    API.fetchMedia(data.message_id).then(mediaInfo => {
-                        if (mediaInfo && mediaInfo.url) {
-                            post.media_url = mediaInfo.url;
-                            post.media_type = mediaInfo.file_type || post.media_type;
-                            const existingPost = document.querySelector(`.post[data-message-id="${data.message_id}"]`);
-                            if (existingPost) UI.updatePost(data.message_id, {
-                                media_url: mediaInfo.url,
-                                media_type: post.media_type
-                            });
-                        } else {
-                            API.pollMedia(data.message_id, (url, failed) => {
-                                if (url) {
-                                    post.media_url = url;
-                                    const existingPost = document.querySelector(`.post[data-message-id="${data.message_id}"]`);
-                                    if (existingPost) UI.updatePost(data.message_id, { media_url: url });
-                                } else if (failed) {
-                                    const existingPost = document.querySelector(`.post[data-message-id="${data.message_id}"]`);
-                                    if (existingPost) UI.updatePostMediaUnavailable(data.message_id);
-                                }
-                            });
-                        }
-                    });
-                }
-            }
             Toast.info('Новое сообщение');
         },
         handleEditMessage(data) {
@@ -778,24 +881,34 @@
             resizeObserver.observe(document.documentElement);
             window.addEventListener('scroll', this.throttledHandle.bind(this), { passive: true });
         },
-        handle() {
-            UI.showScrollTopButton(window.scrollY > 500);
-            if (window.scrollY + window.innerHeight >= State.lastDocumentHeight - 500) {
-                if (!State.isLoading && State.hasMore) {
-                    MessageLoader.loadMessages();
-                }
+        handle(scrollY) {
+            UI.showScrollTopButton(scrollY > 500);
+            if (scrollY + window.innerHeight >= State.lastDocumentHeight - 500) {
+                this.debouncedLoadMore();
             }
-            if (window.scrollY < 200 && State.newPosts.length > 0) {
+            if (scrollY < 200 && State.newPosts.length > 0) {
                 WebSocketManager.flushNewPosts();
             }
         },
-        throttledHandle() {
-            if (State.scrollTimeout) cancelAnimationFrame(State.scrollTimeout);
-            State.scrollTimeout = requestAnimationFrame(() => {
-                this.handle();
-                State.scrollTimeout = null;
-            });
-        }
+        throttledHandle: (() => {
+            let ticking = false;
+            let lastScrollY = 0;
+            return function() {
+                lastScrollY = window.scrollY;
+                if (!ticking) {
+                    requestAnimationFrame(() => {
+                        this.handle(lastScrollY);
+                        ticking = false;
+                    });
+                    ticking = true;
+                }
+            };
+        })(),
+        debouncedLoadMore: debounce(() => {
+            if (!State.isLoading && State.hasMore) {
+                MessageLoader.loadMessages();
+            }
+        }, 300, { leading: true, trailing: false })
     };
 
     function init() {
