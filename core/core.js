@@ -8,13 +8,13 @@
         CHANNEL_USERNAME: document.querySelector('meta[name="mirror:channel-username"]')?.content,
         CHANNEL_AVATAR: document.querySelector('meta[name="mirror:channel-avatar"]')?.content || '📢',
         INITIAL_LIMIT: 20,
-        BUFFER: 6,
-        ESTIMATED_HEIGHT: 180,
-        LAZY_LOAD_OFFSET: 500,
         MAX_RECONNECT_ATTEMPTS: 10,
         RECONNECT_BASE_DELAY: 1000,
         MEDIA_POLL_INTERVAL: 5000,
         MAX_MEDIA_POLL_ATTEMPTS: 12,
+        MAX_VISIBLE_POSTS: 100,
+        LAZY_LOAD_OFFSET: 500,
+        IMAGE_UNLOAD_DISTANCE: 1000,
         DEDUP_TTL: 5000,
         WS_BASE: (() => {
             const apiBase = document.querySelector('meta[name="mirror:api-base"]')?.content || 'https://0808.us.nekhebet.su:8081';
@@ -29,22 +29,21 @@
         offset: 0,
         hasMore: true,
         isLoading: false,
-        postHeights: new Map(),
-        offsets: [],
-        totalHeight: 0,
         ws: null,
         wsConnected: false,
         wsReconnectAttempts: 0,
         mediaCache: new Map(),
         mediaErrorCache: new Set(),
         mediaPollingQueue: new Map(),
+        scrollTimeout: null,
         recentMessages: new Map(),
+        lastDocumentHeight: 0,
         theme: localStorage.getItem('theme') || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'),
+        visiblePosts: new Set(),
         isTransitioning: false,
         pendingTheme: null,
         wsMessageQueue: [],
-        wsProcessing: false,
-        visiblePosts: new Set()
+        wsProcessing: false
     };
 
     const Security = {
@@ -287,203 +286,6 @@
         }
     };
 
-    const VirtualList = {
-        feed: document.getElementById('feed'),
-        topSpacer: document.createElement('div'),
-        bottomSpacer: document.createElement('div'),
-        observer: null,
-
-        init() {
-            this.feed.innerHTML = '';
-            this.feed.appendChild(this.topSpacer);
-            this.feed.appendChild(this.bottomSpacer);
-            this.setupIntersectionObserver();
-            this.rebuildOffsets();
-        },
-
-        setupIntersectionObserver() {
-            this.observer = new IntersectionObserver((entries) => {
-                entries.forEach(entry => {
-                    if (entry.isIntersecting) {
-                        const postId = entry.target.dataset.messageId;
-                        if (postId) {
-                            State.visiblePosts.add(Number(postId));
-                            MediaLoader.loadIfNeeded(Number(postId));
-                        }
-                    } else {
-                        const postId = entry.target.dataset.messageId;
-                        if (postId) {
-                            State.visiblePosts.delete(Number(postId));
-                        }
-                    }
-                });
-            }, {
-                rootMargin: `${CONFIG.LAZY_LOAD_OFFSET}px`,
-                threshold: 0.01
-            });
-        },
-
-        rebuildOffsets() {
-            let sum = 0;
-            State.offsets = State.postOrder.map(id => {
-                const h = State.postHeights.get(id) || CONFIG.ESTIMATED_HEIGHT;
-                const current = sum;
-                sum += h;
-                return current;
-            });
-            State.totalHeight = sum;
-        },
-
-        binarySearchOffset(scrollTop) {
-            let low = 0;
-            let high = State.offsets.length - 1;
-            while (low <= high) {
-                const mid = (low + high) >> 1;
-                if (State.offsets[mid] < scrollTop) low = mid + 1;
-                else high = mid - 1;
-            }
-            return Math.max(0, low - 1);
-        },
-
-        render() {
-            if (State.postOrder.length === 0) return;
-
-            const scrollTop = window.scrollY;
-            const viewportHeight = window.innerHeight;
-
-            const startIndex = Math.max(0, this.binarySearchOffset(scrollTop) - CONFIG.BUFFER);
-            
-            let endIndex = startIndex;
-            let visibleHeight = 0;
-            while (endIndex < State.postOrder.length && visibleHeight < viewportHeight) {
-                const id = State.postOrder[endIndex];
-                visibleHeight += State.postHeights.get(id) || CONFIG.ESTIMATED_HEIGHT;
-                endIndex++;
-            }
-            endIndex = Math.min(State.postOrder.length, endIndex + CONFIG.BUFFER);
-
-            const visibleIds = State.postOrder.slice(startIndex, endIndex);
-
-            const topHeight = State.offsets[startIndex] || 0;
-            const bottomHeight = State.totalHeight - (State.offsets[endIndex] || State.totalHeight);
-
-            this.topSpacer.style.height = topHeight + 'px';
-            this.bottomSpacer.style.height = bottomHeight + 'px';
-
-            const oldPosts = this.feed.querySelectorAll('.post');
-            oldPosts.forEach(post => {
-                if (this.observer) this.observer.unobserve(post);
-                post.remove();
-            });
-
-            const fragment = document.createDocumentFragment();
-            visibleIds.forEach(id => {
-                const post = State.posts.get(id);
-                if (post) {
-                    const el = UI.createPostElement(post);
-                    fragment.appendChild(el);
-                }
-            });
-
-            this.feed.insertBefore(fragment, this.bottomSpacer);
-
-            this.feed.querySelectorAll('.post').forEach(el => {
-                if (this.observer) this.observer.observe(el);
-            });
-
-            this.measureVisibleHeights();
-        },
-
-        measureVisibleHeights() {
-            let changed = false;
-            this.feed.querySelectorAll('.post').forEach(el => {
-                const id = Number(el.dataset.messageId);
-                const h = el.offsetHeight;
-                if (State.postHeights.get(id) !== h) {
-                    State.postHeights.set(id, h);
-                    changed = true;
-                }
-            });
-            if (changed) {
-                this.rebuildOffsets();
-            }
-        },
-
-        addPostToTop(post) {
-            State.postOrder.unshift(post.message_id);
-            const oldHeights = new Map(State.postHeights);
-            State.postHeights.clear();
-            oldHeights.forEach((height, id) => {
-                State.postHeights.set(id, height);
-            });
-            this.rebuildOffsets();
-            this.render();
-            
-            requestAnimationFrame(() => {
-                const newPost = this.feed.querySelector(`[data-message-id="${post.message_id}"]`);
-                if (newPost) {
-                    newPost.classList.add('new');
-                    setTimeout(() => newPost.classList.remove('new'), 3000);
-                }
-            });
-        },
-
-        updatePost(messageId) {
-            const index = State.postOrder.indexOf(messageId);
-            if (index !== -1) {
-                const oldHeight = State.postHeights.get(messageId);
-                State.postHeights.delete(messageId);
-                this.rebuildOffsets();
-                this.render();
-            }
-        },
-
-        deletePost(messageId) {
-            const index = State.postOrder.indexOf(messageId);
-            if (index !== -1) {
-                State.postOrder.splice(index, 1);
-                State.posts.delete(messageId);
-                State.postHeights.delete(messageId);
-                this.rebuildOffsets();
-                this.render();
-            }
-        },
-
-        throttledRender: throttle(function() {
-            VirtualList.render();
-        }, 16)
-    };
-
-    const MediaLoader = {
-        loadIfNeeded(messageId) {
-            const post = State.posts.get(messageId);
-            if (!post || !post.has_media || post.media_url) return;
-
-            API.fetchMedia(messageId).then(mediaInfo => {
-                if (mediaInfo && mediaInfo.url) {
-                    post.media_url = mediaInfo.url;
-                    post.media_type = mediaInfo.file_type || post.media_type;
-                    UI.updatePost(messageId, {
-                        media_url: mediaInfo.url,
-                        media_type: post.media_type
-                    });
-                    VirtualList.updatePost(messageId);
-                }
-            }).catch(() => {
-                API.pollMedia(messageId, (url, failed) => {
-                    if (url) {
-                        post.media_url = url;
-                        UI.updatePost(messageId, { media_url: url });
-                        VirtualList.updatePost(messageId);
-                    } else if (failed) {
-                        UI.updatePostMediaUnavailable(messageId);
-                        VirtualList.updatePost(messageId);
-                    }
-                });
-            });
-        }
-    };
-
     const ThemeManager = {
         video: null,
         videoTimeoutId: null,
@@ -554,6 +356,93 @@
     };
 
     const UI = {
+        observer: null,
+        initIntersectionObserver() {
+            if (this.observer) {
+                this.observer.disconnect();
+            }
+            this.observer = new IntersectionObserver((entries) => {
+                entries.forEach(entry => {
+                    const post = entry.target;
+                    const msgId = Number(post.dataset.messageId);
+                    if (entry.isIntersecting) {
+                        State.visiblePosts.add(msgId);
+                        this.loadPostMedia(msgId);
+                    } else {
+                        State.visiblePosts.delete(msgId);
+                        this.unloadPostMedia(msgId);
+                    }
+                });
+            }, {
+                rootMargin: `${CONFIG.LAZY_LOAD_OFFSET}px`,
+                threshold: 0.01
+            });
+            document.querySelectorAll('.post').forEach(post => {
+                this.observer.observe(post);
+            });
+        },
+        loadPostMedia(messageId) {
+            const post = State.posts.get(messageId);
+            if (!post || !post.has_media || post.media_url) return;
+            
+            API.fetchMedia(messageId).then(mediaInfo => {
+                if (mediaInfo && mediaInfo.url) {
+                    post.media_url = mediaInfo.url;
+                    post.media_type = mediaInfo.file_type || post.media_type;
+                    this.updatePost(messageId, {
+                        media_url: mediaInfo.url,
+                        media_type: post.media_type
+                    });
+                }
+            }).catch(() => {
+                API.pollMedia(messageId, (url, failed) => {
+                    if (url) {
+                        post.media_url = url;
+                        this.updatePost(messageId, { media_url: url });
+                    } else if (failed) {
+                        this.updatePostMediaUnavailable(messageId);
+                    }
+                });
+            });
+        },
+        unloadPostMedia(messageId) {
+            if (!CONFIG.IMAGE_UNLOAD_DISTANCE) return;
+            const postEl = document.querySelector(`.post[data-message-id="${messageId}"]`);
+            if (!postEl) return;
+            const rect = postEl.getBoundingClientRect();
+            const viewportHeight = window.innerHeight;
+            if (rect.top > viewportHeight + CONFIG.IMAGE_UNLOAD_DISTANCE || rect.bottom < -CONFIG.IMAGE_UNLOAD_DISTANCE) {
+                const mediaContainer = postEl.querySelector('.media-container');
+                if (mediaContainer) {
+                    const img = mediaContainer.querySelector('img');
+                    if (img) {
+                        const currentSrc = img.src;
+                        img.dataset.src = currentSrc;
+                        img.src = '';
+                        img.srcset = '';
+                        mediaContainer.innerHTML = '<div class="media-placeholder">📷</div>';
+                    }
+                    const video = mediaContainer.querySelector('video');
+                    if (video) {
+                        video.pause();
+                        video.src = '';
+                        video.load();
+                    }
+                }
+            }
+        },
+        trimOldPosts() {
+            const posts = document.querySelectorAll('.post');
+            if (posts.length > CONFIG.MAX_VISIBLE_POSTS) {
+                const toRemove = Array.from(posts).slice(0, posts.length - CONFIG.MAX_VISIBLE_POSTS);
+                toRemove.forEach(el => {
+                    if (this.observer) {
+                        this.observer.unobserve(el);
+                    }
+                    el.remove();
+                });
+            }
+        },
         updateChannelInfo() {
             document.getElementById('channelTitle').textContent = CONFIG.CHANNEL_TITLE;
             document.getElementById('channelUsername').textContent = `@${CONFIG.CHANNEL_USERNAME}`;
@@ -668,6 +557,51 @@
                 `;
             }
         },
+        renderPosts(posts) {
+            const feed = document.getElementById('feed');
+            const fragment = document.createDocumentFragment();
+            posts.forEach(post => {
+                const postEl = this.createPostElement(post);
+                fragment.appendChild(postEl);
+            });
+            feed.appendChild(fragment);
+            feed.querySelectorAll('.post').forEach(post => {
+                requestAnimationFrame(() => post.classList.add('visible'));
+            });
+            if (this.observer) {
+                feed.querySelectorAll('.post').forEach(post => {
+                    this.observer.observe(post);
+                });
+            }
+            this.trimOldPosts();
+            
+            posts.forEach(post => {
+                if (post.has_media && !post.media_url) {
+                    this.loadPostMedia(post.message_id);
+                }
+            });
+        },
+        addPostToTop(post) {
+            const feed = document.getElementById('feed');
+            const postEl = this.createPostElement(post);
+            if (feed.firstChild) {
+                feed.insertBefore(postEl, feed.firstChild);
+            } else {
+                feed.appendChild(postEl);
+            }
+            requestAnimationFrame(() => {
+                postEl.classList.add('visible', 'new');
+            });
+            setTimeout(() => postEl.classList.remove('new'), 3000);
+            if (this.observer) {
+                this.observer.observe(postEl);
+            }
+            this.trimOldPosts();
+            
+            if (post.has_media && !post.media_url) {
+                this.loadPostMedia(post.message_id);
+            }
+        },
         updatePost(messageId, data) {
             const postEl = document.querySelector(`.post[data-message-id="${messageId}"]`);
             if (!postEl) return false;
@@ -725,14 +659,38 @@
             }
             return false;
         },
+        deletePost(messageId) {
+            const postEl = document.querySelector(`.post[data-message-id="${messageId}"]`);
+            if (!postEl) return false;
+            if (this.observer) {
+                this.observer.unobserve(postEl);
+            }
+            postEl.classList.add('deleted');
+            setTimeout(() => {
+                postEl.remove();
+                State.posts.delete(messageId);
+                const index = State.postOrder.indexOf(Number(messageId));
+                if (index !== -1) State.postOrder.splice(index, 1);
+                API.cancelMediaPoll(messageId);
+            }, 300);
+            return true;
+        },
+        setLoaderVisible(visible) {
+            const trigger = document.getElementById('infiniteScrollTrigger');
+            if (trigger) {
+                trigger.textContent = visible ? 'Загрузка...' : '↓ Загрузить ещё';
+            }
+        },
         showScrollTopButton(visible) {
             const btn = document.getElementById('scrollTopBtn');
             if (btn) btn.style.display = visible ? 'flex' : 'none';
         },
         cleanup() {
-            if (VirtualList.observer) {
-                VirtualList.observer.disconnect();
+            if (this.observer) {
+                this.observer.disconnect();
+                this.observer = null;
             }
+            API.clearMediaCache();
         }
     };
 
@@ -764,41 +722,68 @@
                 UI.cleanup();
                 State.posts.clear();
                 State.postOrder = [];
-                State.postHeights.clear();
+                document.getElementById('feed').innerHTML = '';
                 State.offset = 0;
                 State.hasMore = true;
                 API.clearMediaCache();
-                VirtualList.init();
             }
-            if (!State.hasMore) return;
+            if (!State.hasMore) {
+                document.getElementById('infiniteScrollTrigger').style.display = 'none';
+                return;
+            }
             State.isLoading = true;
+            UI.setLoaderVisible(true);
             try {
                 const data = await API.fetchMessages(State.offset, CONFIG.INITIAL_LIMIT);
                 if (data.messages && data.messages.length > 0) {
                     State.hasMore = data.hasMore !== false;
                     State.offset += data.messages.length;
+                    const newMessages = [];
                     data.messages.forEach(post => {
                         if (!State.posts.has(post.message_id)) {
                             State.posts.set(post.message_id, post);
                             State.postOrder.push(post.message_id);
-                            State.postHeights.set(post.message_id, CONFIG.ESTIMATED_HEIGHT);
+                            newMessages.push(post);
                         }
                     });
-                    VirtualList.rebuildOffsets();
-                    VirtualList.render();
+                    if (newMessages.length > 0) {
+                        UI.renderPosts(newMessages);
+                    }
                 } else {
                     State.hasMore = false;
                 }
             } catch (err) {
             } finally {
                 State.isLoading = false;
+                UI.setLoaderVisible(false);
             }
         },
         async loadInitial() {
             UI.showSkeletonLoaders();
-            VirtualList.init();
             await this.loadMessages(true);
+            UI.initIntersectionObserver();
         }
+    };
+
+    const Toast = {
+        show(message, type = 'info', duration = 3000) {
+            const container = document.getElementById('toastContainer');
+            if (!container) return;
+            const toast = document.createElement('div');
+            toast.className = `toast ${type}`;
+            const icons = { info: 'ℹ️', success: '✅', warning: '⚠️', error: '❌' };
+            toast.innerHTML = `${icons[type] || 'ℹ️'} ${message}`;
+            container.appendChild(toast);
+            setTimeout(() => {
+                toast.style.opacity = '0';
+                toast.style.transform = 'translate(-50%, 20px)';
+                setTimeout(() => toast.remove(), 300);
+            }, duration);
+        },
+        info(message) { this.show(message, 'info'); },
+        success(message) { this.show(message, 'success'); },
+        warning(message) { this.show(message, 'warning'); },
+        error(message) { this.show(message, 'error'); }
     };
 
     const WebSocketManager = {
@@ -809,6 +794,7 @@
                     State.wsConnected = true;
                     State.wsReconnectAttempts = 0;
                     UI.updateConnectionStatus(true);
+                    Toast.success('Подключено к серверу');
                     setInterval(() => {
                         if (State.ws && State.ws.readyState === WebSocket.OPEN) {
                             State.ws.send(JSON.stringify({ type: 'ping' }));
@@ -822,6 +808,7 @@
                 State.ws.onclose = () => {
                     State.wsConnected = false;
                     UI.updateConnectionStatus(false);
+                    Toast.warning('Отключено от сервера');
                     this.reconnect();
                 };
                 State.ws.onerror = () => {};
@@ -896,10 +883,20 @@
                         if (mediaInfo && mediaInfo.url) {
                             post.media_url = mediaInfo.url;
                             post.media_type = mediaInfo.file_type || post.media_type;
+                        } else {
+                            API.pollMedia(data.message_id, (url, failed) => {
+                                if (url) {
+                                    post.media_url = url;
+                                } else if (failed) {
+                                    post.media_unavailable = true;
+                                }
+                            });
                         }
                     });
                 }
             }
+            
+            Toast.info('Новое сообщение');
         },
         handleEditMessage(data) {
             if (State.posts.has(data.message_id)) {
@@ -917,19 +914,23 @@
                 media_url: data.media_url,
                 media_type: data.media_type
             });
-            VirtualList.updatePost(data.message_id);
+            Toast.info('Сообщение обновлено');
         },
         handleDeleteMessage(data) {
-            VirtualList.deletePost(data.message_id);
+            State.posts.delete(data.message_id);
+            const index = State.postOrder.indexOf(data.message_id);
+            if (index !== -1) State.postOrder.splice(index, 1);
+            UI.deletePost(data.message_id);
             API.cancelMediaPoll(data.message_id);
+            Toast.warning('Сообщение удалено');
         },
         flushNewPosts() {
             if (State.newPosts.length === 0) return;
             while (State.newPosts.length > 0) {
                 const post = State.newPosts.shift();
+                UI.addPostToTop(post);
                 State.posts.set(post.message_id, post);
-                State.postHeights.set(post.message_id, CONFIG.ESTIMATED_HEIGHT);
-                VirtualList.addPostToTop(post);
+                State.postOrder.unshift(post.message_id);
             }
             UI.updateNewPostsBadge();
         }
@@ -937,25 +938,36 @@
 
     const ScrollHandler = {
         init() {
+            State.lastDocumentHeight = document.documentElement.scrollHeight;
+            const resizeObserver = new ResizeObserver(() => {
+                State.lastDocumentHeight = document.documentElement.scrollHeight;
+            });
+            resizeObserver.observe(document.documentElement);
             window.addEventListener('scroll', this.throttledHandle.bind(this), { passive: true });
-            window.addEventListener('resize', debounce(() => {
-                VirtualList.measureVisibleHeights();
-                VirtualList.render();
-            }, 150));
         },
-        handle() {
-            VirtualList.throttledRender();
-            UI.showScrollTopButton(window.scrollY > 500);
-            if (window.innerHeight + window.scrollY >= document.body.offsetHeight - 800) {
+        handle(scrollY) {
+            UI.showScrollTopButton(scrollY > 500);
+            if (scrollY + window.innerHeight >= State.lastDocumentHeight - 500) {
                 this.debouncedLoadMore();
             }
-            if (window.scrollY < 200 && State.newPosts.length > 0) {
+            if (scrollY < 200 && State.newPosts.length > 0) {
                 WebSocketManager.flushNewPosts();
             }
         },
-        throttledHandle: throttle(function() {
-            ScrollHandler.handle();
-        }, 16),
+        throttledHandle: (() => {
+            let ticking = false;
+            let lastScrollY = 0;
+            return function() {
+                lastScrollY = window.scrollY;
+                if (!ticking) {
+                    requestAnimationFrame(() => {
+                        this.handle(lastScrollY);
+                        ticking = false;
+                    });
+                    ticking = true;
+                }
+            };
+        })(),
         debouncedLoadMore: debounce(() => {
             if (!State.isLoading && State.hasMore) {
                 MessageLoader.loadMessages();
