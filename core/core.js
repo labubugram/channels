@@ -469,7 +469,9 @@
                     
                     if (entry.isIntersecting) {
                         State.visiblePosts.add(postId);
-                        UI.loadPostMedia(postId);
+                        if (!State.mediaErrorCache.has(postId)) {
+                            UI.loadPostMedia(postId);
+                        }
                         needsVideoUpdate = true;
                     } else {
                         State.visiblePosts.delete(postId);
@@ -632,6 +634,56 @@
             }
         },
 
+        isVideoType(url, type) {
+            if (type) {
+                const typeStr = String(type).toLowerCase();
+                if (typeStr.includes('video') || typeStr.includes('animation') || typeStr === 'messagemediadocument') {
+                    return true;
+                }
+            }
+            if (url && url.match(/\.(mp4|webm|mov|gif)$/i)) {
+                return true;
+            }
+            return false;
+        },
+
+        renderMedia(url, type) {
+            if (!url) return '';
+            
+            const fullUrl = url.startsWith('http') ? url : `${CONFIG.API_BASE}${url}`;
+            
+            let isVideo = this.isVideoType(url, type);
+            
+            if (isVideo) {
+                return `
+                    <div class="media-container video-container" style="min-height: ${CONFIG.VIDEO_HEIGHT}px; background: #000;">
+                        <video 
+                            src="${fullUrl}" 
+                            controls
+                            preload="metadata" 
+                            playsinline
+                            muted
+                            style="width: 100%; max-height: ${CONFIG.VIDEO_HEIGHT}px; background: #000;">
+                            Ваш браузер не поддерживает видео.
+                        </video>
+                    </div>
+                `;
+            } else {
+                return `
+                    <div class="media-container image-container" style="min-height: 200px; background: var(--bg-secondary);">
+                        <img 
+                            src="${fullUrl}" 
+                            alt="Media" 
+                            loading="lazy" 
+                            decoding="async"
+                            style="width: 100%; max-height: 500px; object-fit: contain;"
+                            onload="this.parentElement.style.minHeight = 'auto';"
+                            onerror="this.onerror=null; this.parentElement.innerHTML='<div class=\\'media-error\\'>📷 Ошибка загрузки</div>';">
+                    </div>
+                `;
+            }
+        },
+
         createPostElement(post) {
             const postEl = document.createElement('div');
             postEl.className = 'post';
@@ -657,9 +709,6 @@
                 } else if (State.mediaErrorCache.has(post.message_id)) {
                     mediaHTML = '<div class="media-unavailable">📷 Медиа недоступно</div>';
                 } else {
-                    if (post.media_type && post.media_type.toLowerCase().includes('video')) {
-                        isVideo = true;
-                    }
                     mediaHTML = '<div class="media-loading">📷 Загрузка медиа...</div>';
                 }
             }
@@ -690,7 +739,9 @@
             `;
             
             if (isVideo) {
-                VideoManager.initVideo(postEl, post.message_id, post.media_url || State.mediaCache.get(post.message_id)?.url);
+                setTimeout(() => {
+                    VideoManager.initVideo(postEl, post.message_id, post.media_url || State.mediaCache.get(post.message_id)?.url);
+                }, 0);
             }
             
             const mediaContainer = postEl.querySelector('.media-container');
@@ -705,56 +756,6 @@
             }
             
             return postEl;
-        },
-
-        isVideoType(url, type) {
-            if (type) {
-                const typeStr = String(type).toLowerCase();
-                if (typeStr.includes('video') || typeStr.includes('animation') || typeStr === 'messagemediadocument') {
-                    return true;
-                }
-            }
-            if (url && url.match(/\.(mp4|webm|mov|gif)$/i)) {
-                return true;
-            }
-            return false;
-        },
-
-        renderMedia(url, type) {
-            if (!url) return '';
-            
-            const fullUrl = url.startsWith('http') ? url : `${CONFIG.API_BASE}${url}`;
-            
-            let isVideo = this.isVideoType(url, type);
-            
-            if (isVideo) {
-                return `
-                    <div class="media-container video-container" style="min-height: ${CONFIG.VIDEO_HEIGHT}px;">
-                        <video 
-                            src="${fullUrl}" 
-                            controls
-                            preload="metadata" 
-                            playsinline
-                            muted
-                            style="width: 100%; max-height: ${CONFIG.VIDEO_HEIGHT}px; background: #000;">
-                            Ваш браузер не поддерживает видео.
-                        </video>
-                    </div>
-                `;
-            } else {
-                return `
-                    <div class="media-container image-container" style="min-height: 200px;">
-                        <img 
-                            src="${fullUrl}" 
-                            alt="Media" 
-                            loading="lazy" 
-                            decoding="async"
-                            style="width: 100%; max-height: 500px; object-fit: contain;"
-                            onload="this.parentElement.style.minHeight = 'auto';"
-                            onerror="this.onerror=null; this.parentElement.innerHTML='<div class=\\'media-error\\'>📷 Ошибка загрузки</div>';">
-                    </div>
-                `;
-            }
         },
 
         async loadPostMedia(messageId) {
@@ -787,20 +788,6 @@
                 if (postEl) {
                     this.updatePostMedia(messageId, mediaInfo.url, post.media_type);
                 }
-            } else if (!State.mediaErrorCache.has(messageId)) {
-                API.pollMedia(messageId, (url, failed) => {
-                    if (url) {
-                        post.media_url = url;
-                        State.posts.set(messageId, post);
-                        const postEl = document.querySelector(`.post[data-message-id="${messageId}"]`);
-                        if (postEl) {
-                            this.updatePostMedia(messageId, url, post.media_type);
-                        }
-                    } else if (failed) {
-                        State.mediaErrorCache.add(messageId);
-                        this.updatePostMediaUnavailable(messageId);
-                    }
-                });
             }
         },
 
@@ -817,7 +804,9 @@
                     mediaContainer.outerHTML = newMedia;
                     
                     if (isVideo) {
-                        VideoManager.initVideo(postEl, messageId, url);
+                        setTimeout(() => {
+                            VideoManager.initVideo(postEl, messageId, url);
+                        }, 0);
                     }
                     
                     const newMediaContainer = postEl.querySelector('.media-container');
@@ -830,9 +819,11 @@
                     postEl.dataset.mediaUrl = url;
                     postEl.dataset.mediaType = type || '';
                     
-                    const height = postEl.offsetHeight;
-                    State.postHeights.set(messageId, height);
-                    VirtualList.rebuildOffsets();
+                    setTimeout(() => {
+                        const height = postEl.offsetHeight;
+                        State.postHeights.set(messageId, height);
+                        VirtualList.rebuildOffsets();
+                    }, 100);
                 }
             }
         },
@@ -845,21 +836,31 @@
             if (mediaContainer) {
                 mediaContainer.outerHTML = '<div class="media-unavailable">📷 Медиа недоступно</div>';
                 
-                const height = postEl.offsetHeight;
-                State.postHeights.set(messageId, height);
-                VirtualList.rebuildOffsets();
+                setTimeout(() => {
+                    const height = postEl.offsetHeight;
+                    State.postHeights.set(messageId, height);
+                    VirtualList.rebuildOffsets();
+                }, 100);
             }
         },
 
         addNewPost(post) {
             State.posts.set(post.message_id, post);
             State.postOrder.unshift(post.message_id);
-            State.postHeights.set(post.message_id, CONFIG.ESTIMATED_HEIGHT);
+            
+            let estimatedHeight = CONFIG.ESTIMATED_HEIGHT;
+            if (post.has_media) {
+                if (post.media_type && post.media_type.toLowerCase().includes('video')) {
+                    estimatedHeight = CONFIG.VIDEO_HEIGHT;
+                }
+            }
+            State.postHeights.set(post.message_id, estimatedHeight);
+            
             VirtualList.rebuildOffsets();
             VirtualList.render();
             
-            if (post.has_media && !post.media_url) {
-                setTimeout(() => this.loadPostMedia(post.message_id), 100);
+            if (post.has_media && !post.media_url && !State.mediaErrorCache.has(post.message_id)) {
+                setTimeout(() => this.loadPostMedia(post.message_id), 200);
             }
         },
 
@@ -996,6 +997,7 @@
                     State.hasMore = data.hasMore !== false;
                     State.offset += data.messages.length;
                     
+                    const newPosts = [];
                     data.messages.forEach(post => {
                         if (!State.posts.has(post.message_id)) {
                             State.posts.set(post.message_id, post);
@@ -1008,19 +1010,22 @@
                                 }
                             }
                             State.postHeights.set(post.message_id, estimatedHeight);
+                            newPosts.push(post);
                         }
                     });
                     
                     VirtualList.rebuildOffsets();
                     VirtualList.render();
                     
-                    setTimeout(() => {
-                        data.messages.forEach(post => {
-                            if (post.has_media && !post.media_url) {
-                                UI.loadPostMedia(post.message_id);
-                            }
-                        });
-                    }, 200);
+                    if (newPosts.length > 0) {
+                        setTimeout(() => {
+                            newPosts.forEach(post => {
+                                if (post.has_media && !post.media_url && !State.mediaErrorCache.has(post.message_id)) {
+                                    UI.loadPostMedia(post.message_id);
+                                }
+                            });
+                        }, 300);
+                    }
                 } else {
                     State.hasMore = false;
                 }
