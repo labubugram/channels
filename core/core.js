@@ -384,6 +384,7 @@
         loadPostMedia(messageId) {
             const post = State.posts.get(messageId);
             if (!post || !post.has_media || post.media_url) return;
+            
             API.fetchMedia(messageId).then(mediaInfo => {
                 if (mediaInfo && mediaInfo.url) {
                     post.media_url = mediaInfo.url;
@@ -393,6 +394,15 @@
                         media_type: post.media_type
                     });
                 }
+            }).catch(() => {
+                API.pollMedia(messageId, (url, failed) => {
+                    if (url) {
+                        post.media_url = url;
+                        this.updatePost(messageId, { media_url: url });
+                    } else if (failed) {
+                        this.updatePostMediaUnavailable(messageId);
+                    }
+                });
             });
         },
         unloadPostMedia(messageId) {
@@ -406,6 +416,8 @@
                 if (mediaContainer) {
                     const img = mediaContainer.querySelector('img');
                     if (img) {
+                        const currentSrc = img.src;
+                        img.dataset.src = currentSrc;
                         img.src = '';
                         img.srcset = '';
                         mediaContainer.innerHTML = '<div class="media-placeholder">📷</div>';
@@ -507,6 +519,13 @@
                 </div>
             `;
             
+            const mediaContainer = postEl.querySelector('.media-container');
+            if (mediaContainer) {
+                mediaContainer.addEventListener('click', () => {
+                    Lightbox.open(post.media_url, post.media_type);
+                });
+            }
+            
             return postEl;
         },
         renderMedia(url, type) {
@@ -555,6 +574,12 @@
                 });
             }
             this.trimOldPosts();
+            
+            posts.forEach(post => {
+                if (post.has_media && !post.media_url) {
+                    this.loadPostMedia(post.message_id);
+                }
+            });
         },
         addPostToTop(post) {
             const feed = document.getElementById('feed');
@@ -572,6 +597,10 @@
                 this.observer.observe(postEl);
             }
             this.trimOldPosts();
+            
+            if (post.has_media && !post.media_url) {
+                this.loadPostMedia(post.message_id);
+            }
         },
         updatePost(messageId, data) {
             const postEl = document.querySelector(`.post[data-message-id="${messageId}"]`);
@@ -600,6 +629,12 @@
                     const newMedia = this.renderMedia(data.media_url, data.media_type);
                     if (newMedia) {
                         mediaContainer.outerHTML = newMedia;
+                        const newMediaContainer = postEl.querySelector('.media-container');
+                        if (newMediaContainer) {
+                            newMediaContainer.addEventListener('click', () => {
+                                Lightbox.open(data.media_url, data.media_type);
+                            });
+                        }
                         postEl.dataset.mediaUrl = data.media_url;
                         postEl.dataset.mediaType = data.media_type || '';
                         changed = true;
@@ -819,19 +854,48 @@
         },
         handleNewMessage(data) {
             if (State.posts.has(data.message_id)) return;
+            
+            const hasMedia = !!(data.media_type || data.media_url);
+            let mediaType = data.media_type;
+            if (!mediaType && data.media_url) {
+                mediaType = data.media_url.match(/\.(mp4|webm|mov)$/i) ? 'video' : 'photo';
+            }
+            
             const post = {
                 message_id: data.message_id,
                 text: data.text || '',
                 date: data.date || new Date().toISOString(),
                 views: data.views || 0,
-                has_media: !!(data.media_type || data.media_url),
-                media_type: data.media_type,
+                has_media: hasMedia,
+                media_type: mediaType,
                 media_url: data.media_url,
                 is_edited: false
             };
+            
             State.newPosts.push(post);
             UI.updateNewPostsBadge();
-            if (window.scrollY < 200) this.flushNewPosts();
+            
+            if (window.scrollY < 200) {
+                WebSocketManager.flushNewPosts();
+            } else {
+                if (hasMedia && !data.media_url) {
+                    API.fetchMedia(data.message_id).then(mediaInfo => {
+                        if (mediaInfo && mediaInfo.url) {
+                            post.media_url = mediaInfo.url;
+                            post.media_type = mediaInfo.file_type || post.media_type;
+                        } else {
+                            API.pollMedia(data.message_id, (url, failed) => {
+                                if (url) {
+                                    post.media_url = url;
+                                } else if (failed) {
+                                    post.media_unavailable = true;
+                                }
+                            });
+                        }
+                    });
+                }
+            }
+            
             Toast.info('Новое сообщение');
         },
         handleEditMessage(data) {
