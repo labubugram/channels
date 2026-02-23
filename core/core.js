@@ -396,7 +396,7 @@
             
             this.virtualContainer = document.createElement('div');
             this.virtualContainer.style.position = 'relative';
-            this.virtualContainer.style.width = '100%;
+            this.virtualContainer.style.width = '100%';
             this.virtualContainer.style.height = `${State.totalHeight}px`;
             
             this.feed.innerHTML = '';
