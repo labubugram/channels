@@ -8,10 +8,8 @@
     <meta name="mirror:channel-title" content="LabubuGram">
     <meta name="mirror:channel-username" content="labubugram">
     <meta name="mirror:channel-avatar" content="">
-    <title>LabubuGram · Labubu Messenger</title>
-    
+    <title>LabubuGram · Telegram Mirror</title>
     <link rel="stylesheet" href="/channels/core/core.css">
-    <script src="https://unpkg.com/@tanstack/virtual-core@3.0.0/build/umd/index.production.js"></script>
 </head>
 <body>
     <video class="bg-video" id="bgVideo" autoplay loop muted playsinline preload="auto">
@@ -39,7 +37,9 @@
             </div>
         </div>
 
-        <div class="feed" id="feed"></div>
+        <div id="virtualContainer" class="virtual-container">
+            <div id="virtualContent" class="virtual-content"></div>
+        </div>
 
         <div id="infiniteScrollTrigger" class="infinite-scroll-trigger">
             ↓ Загрузить ещё
@@ -57,6 +57,7 @@
         <div id="toastContainer"></div>
     </div>
 
+    <script src="https://cdn.jsdelivr.net/npm/@tanstack/virtual-core@3.13.2/dist/umd/index.min.js"></script>
     <script src="/channels/core/core.js"></script>
 </body>
 </html>
