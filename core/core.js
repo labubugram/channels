@@ -875,28 +875,44 @@
             State.newPosts.push(post);
             UI.updateNewPostsBadge();
             
+            if (hasMedia && !data.media_url) {
+                this.loadMediaForPost(data.message_id);
+            }
+            
             if (window.scrollY < 200) {
-                WebSocketManager.flushNewPosts();
-            } else {
-                if (hasMedia && !data.media_url) {
-                    API.fetchMedia(data.message_id).then(mediaInfo => {
-                        if (mediaInfo && mediaInfo.url) {
-                            post.media_url = mediaInfo.url;
-                            post.media_type = mediaInfo.file_type || post.media_type;
-                        } else {
-                            API.pollMedia(data.message_id, (url, failed) => {
-                                if (url) {
-                                    post.media_url = url;
-                                } else if (failed) {
-                                    post.media_unavailable = true;
-                                }
+                this.flushNewPosts();
+            }
+        },
+        loadMediaForPost(messageId) {
+            API.fetchMedia(messageId).then(mediaInfo => {
+                if (mediaInfo && mediaInfo.url) {
+                    const post = State.posts.get(messageId);
+                    if (post) {
+                        post.media_url = mediaInfo.url;
+                        post.media_type = mediaInfo.file_type || post.media_type;
+                        if (document.querySelector(`.post[data-message-id="${messageId}"]`)) {
+                            UI.updatePost(messageId, {
+                                media_url: mediaInfo.url,
+                                media_type: post.media_type
                             });
+                        }
+                    }
+                } else {
+                    API.pollMedia(messageId, (url, failed) => {
+                        if (url) {
+                            const post = State.posts.get(messageId);
+                            if (post) {
+                                post.media_url = url;
+                                if (document.querySelector(`.post[data-message-id="${messageId}"]`)) {
+                                    UI.updatePost(messageId, { media_url: url });
+                                }
+                            }
+                        } else if (failed) {
+                            UI.updatePostMediaUnavailable(messageId);
                         }
                     });
                 }
-            }
-            
-            Toast.info('Новое сообщение');
+            });
         },
         handleEditMessage(data) {
             if (State.posts.has(data.message_id)) {
