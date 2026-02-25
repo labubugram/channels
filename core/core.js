@@ -43,7 +43,9 @@
         isTransitioning: false,
         pendingTheme: null,
         wsMessageQueue: [],
-        wsProcessing: false
+        wsProcessing: false,
+        domCache: null,
+        scrollPosition: 0
     };
 
     const Security = {
@@ -68,6 +70,9 @@
         },
         validateMessageId(id) {
             return Number.isInteger(Number(id)) && Number(id) > 0;
+        },
+        validateMediaId(id) {
+            return /^[0-9a-f-]+$/.test(id);
         }
     };
 
@@ -98,9 +103,11 @@
             if (views >= 1000) return `${(views / 1000).toFixed(1)}K`;
             return views.toString();
         },
-        formatText(text) {
+        formatText(text, entities = []) {
             if (!text) return '';
             let escaped = Security.escapeHtml(text);
+            
+            // Markdown-style links
             escaped = escaped.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (match, linkText, url) => {
                 const safeUrl = Security.sanitizeUrl(url);
                 if (safeUrl === '#') return match;
@@ -113,20 +120,79 @@
                 }
                 return `<a href="${safeUrl}" target="_blank" rel="noopener noreferrer nofollow" class="tg-link" title="${url}" data-domain="${domain}">${linkText}</a>`;
             });
-            escaped = escaped.replace(/```([\s\S]*?)```/g, '<pre class="tg-code-block"><code>$1</code></pre>');
-            escaped = escaped.replace(/`([^`]+)`/g, '<code class="tg-inline-code">$1</code>');
-            const formatters = [
-                { pattern: /\*\*\*(.*?)\*\*\*/g, replacement: '<b><i>$1</i></b>' },
-                { pattern: /\*\*(.*?)\*\*/g, replacement: '<b>$1</b>' },
-                { pattern: /__(.*?)__/g, replacement: '<u>$1</u>' },
-                { pattern: /\*(.*?)\*/g, replacement: '<i>$1</i>' },
-                { pattern: /_(.*?)_/g, replacement: '<i>$1</i>' },
-                { pattern: /~~(.*?)~~/g, replacement: '<s>$1</s>' },
-                { pattern: /\|\|(.*?)\|\|/g, replacement: '<span class="tg-spoiler" onclick="this.classList.toggle(\'revealed\')">$1</span>' }
-            ];
-            for (const formatter of formatters) {
-                escaped = escaped.replace(formatter.pattern, formatter.replacement);
+
+            // Handle entities if provided
+            if (entities && entities.length > 0) {
+                const sortedEntities = [...entities].sort((a, b) => b.offset - a.offset);
+                for (const entity of sortedEntities) {
+                    const { offset, length, type } = entity;
+                    if (offset < 0 || offset + length > escaped.length) continue;
+                    const before = escaped.substring(0, offset);
+                    const content = escaped.substring(offset, offset + length);
+                    const after = escaped.substring(offset + length);
+                    
+                    switch (type) {
+                        case 'bold':
+                        case 'Bold':
+                            escaped = before + `<b>${content}</b>` + after;
+                            break;
+                        case 'italic':
+                        case 'Italic':
+                            escaped = before + `<i>${content}</i>` + after;
+                            break;
+                        case 'underline':
+                        case 'Underline':
+                            escaped = before + `<u>${content}</u>` + after;
+                            break;
+                        case 'strikethrough':
+                        case 'Strikethrough':
+                            escaped = before + `<s>${content}</s>` + after;
+                            break;
+                        case 'code':
+                            escaped = before + `<code class="tg-inline-code">${content}</code>` + after;
+                            break;
+                        case 'pre':
+                            escaped = before + `<pre class="tg-code-block"><code>${content}</code></pre>` + after;
+                            break;
+                        case 'spoiler':
+                        case 'Spoiler':
+                            escaped = before + `<span class="tg-spoiler" onclick="this.classList.toggle('revealed')">${content}</span>` + after;
+                            break;
+                        case 'text_link':
+                            if (entity.url) {
+                                const safeUrl = Security.sanitizeUrl(entity.url);
+                                escaped = before + `<a href="${safeUrl}" target="_blank" rel="noopener noreferrer nofollow" class="tg-link">${content}</a>` + after;
+                            }
+                            break;
+                        case 'mention':
+                            escaped = before + `<span class="tg-mention" data-mention="${content}">${content}</span>` + after;
+                            break;
+                        case 'hashtag':
+                            escaped = before + `<span class="tg-hashtag" data-hashtag="${content}">${content}</span>` + after;
+                            break;
+                    }
+                }
+            } else {
+                // Fallback to regex-based formatting
+                escaped = escaped.replace(/```([\s\S]*?)```/g, '<pre class="tg-code-block"><code>$1</code></pre>');
+                escaped = escaped.replace(/`([^`]+)`/g, '<code class="tg-inline-code">$1</code>');
+                
+                const formatters = [
+                    { pattern: /\*\*\*(.*?)\*\*\*/g, replacement: '<b><i>$1</i></b>' },
+                    { pattern: /\*\*(.*?)\*\*/g, replacement: '<b>$1</b>' },
+                    { pattern: /__(.*?)__/g, replacement: '<u>$1</u>' },
+                    { pattern: /\*(.*?)\*/g, replacement: '<i>$1</i>' },
+                    { pattern: /_(.*?)_/g, replacement: '<i>$1</i>' },
+                    { pattern: /~~(.*?)~~/g, replacement: '<s>$1</s>' },
+                    { pattern: /\|\|(.*?)\|\|/g, replacement: '<span class="tg-spoiler" onclick="this.classList.toggle(\'revealed\')">$1</span>' }
+                ];
+                
+                for (const formatter of formatters) {
+                    escaped = escaped.replace(formatter.pattern, formatter.replacement);
+                }
             }
+
+            // Auto-link URLs
             escaped = escaped.replace(/(?<!href="|">)(https?:\/\/[^\s<"')]+)(?![^<]*>)/g, (url) => {
                 const safeUrl = Security.sanitizeUrl(url);
                 if (safeUrl === '#') return url;
@@ -143,17 +209,24 @@
                 }
                 return `<a href="${safeUrl}" target="_blank" rel="noopener noreferrer nofollow" class="tg-link" data-domain="${displayDomain}" title="${url}">${displayText}</a>`;
             });
+
+            // Quotes
             escaped = escaped.replace(/^&gt;&gt;&gt; (.*)$/gm, '<blockquote class="tg-quote level-3">$1</blockquote>');
             escaped = escaped.replace(/^&gt;&gt; (.*)$/gm, '<blockquote class="tg-quote level-2">$1</blockquote>');
             escaped = escaped.replace(/^&gt; (.*)$/gm, '<blockquote class="tg-quote level-1">$1</blockquote>');
+
+            // Mentions and hashtags
             escaped = escaped.replace(/(?<!>|href=")@(\w+)(?!<)/g, '<span class="tg-mention" data-mention="@$1" title="@$1 в Telegram">@$1</span>');
             escaped = escaped.replace(/(?<!>|href=")#(\w+)(?!<)/g, '<span class="tg-hashtag" data-hashtag="#$1">#$1</span>');
+
+            // Line breaks
             const lines = escaped.split('\n');
             for (let i = 0; i < lines.length; i++) {
                 if (i < lines.length - 1 && !lines[i].match(/<[^>]+>$/)) {
                     lines[i] += '<br>';
                 }
             }
+            
             return lines.join('');
         }
     };
@@ -202,10 +275,12 @@
                 return { messages: [], hasMore: false };
             }
         },
+        
         async fetchMedia(messageId) {
             if (!Security.validateMessageId(messageId)) return null;
             if (State.mediaErrorCache.has(messageId)) return null;
             if (State.mediaCache.has(messageId)) return State.mediaCache.get(messageId);
+            
             if (State.mediaPollingQueue.has(messageId)) {
                 const { attempts } = State.mediaPollingQueue.get(messageId);
                 if (attempts >= CONFIG.MAX_MEDIA_POLL_ATTEMPTS) {
@@ -214,12 +289,17 @@
                     return null;
                 }
             }
+            
             try {
-                const response = await fetch(`${CONFIG.API_BASE}/api/media/by-message/${messageId}?channel_id=${CONFIG.CHANNEL_ID}`);
+                let url = `${CONFIG.API_BASE}/api/media/by-message/${messageId}`;
+                url += `?channel_id=${CONFIG.CHANNEL_ID}`;
+                const response = await fetch(url);
+                
                 if (!response.ok) {
                     if (response.status === 404) return null;
                     throw new Error(`HTTP ${response.status}`);
                 }
+                
                 const data = await response.json();
                 if (data && data.url) {
                     State.mediaCache.set(messageId, data);
@@ -233,8 +313,10 @@
             } catch (err) {}
             return null;
         },
+        
         pollMedia(messageId, callback, maxAttempts = CONFIG.MAX_MEDIA_POLL_ATTEMPTS) {
             if (State.mediaPollingQueue.has(messageId) || State.mediaErrorCache.has(messageId)) return;
+            
             const poll = (attempt) => {
                 if (attempt > maxAttempts) {
                     if (State.mediaPollingQueue.has(messageId)) {
@@ -246,6 +328,7 @@
                     callback(null, true);
                     return;
                 }
+                
                 API.fetchMedia(messageId).then(mediaInfo => {
                     if (mediaInfo && mediaInfo.url) {
                         State.mediaCache.set(messageId, mediaInfo);
@@ -268,8 +351,10 @@
                     State.mediaPollingQueue.set(messageId, { attempts: attempt, timeoutId });
                 });
             };
+            
             poll(1);
         },
+        
         cancelMediaPoll(messageId) {
             if (State.mediaPollingQueue.has(messageId)) {
                 const { timeoutId } = State.mediaPollingQueue.get(messageId);
@@ -277,18 +362,25 @@
                 State.mediaPollingQueue.delete(messageId);
             }
         },
+        
+        cancelAllMediaPoll() {
+            State.mediaPollingQueue.forEach((data, messageId) => {
+                if (data.timeoutId) clearTimeout(data.timeoutId);
+                State.mediaPollingQueue.delete(messageId);
+            });
+        },
+        
         clearMediaCache() {
             State.mediaCache.clear();
             State.mediaErrorCache.clear();
-            State.mediaPollingQueue.forEach((_, msgId) => {
-                this.cancelMediaPoll(msgId);
-            });
+            this.cancelAllMediaPoll();
         }
     };
 
     const ThemeManager = {
         video: null,
         videoTimeoutId: null,
+        
         init() {
             this.video = document.getElementById('bgVideo');
             if (this.video) {
@@ -298,6 +390,7 @@
             }
             this.applyTheme(State.theme, false);
         },
+        
         applyTheme(theme, animate = true) {
             if (animate) {
                 document.documentElement.classList.add('theme-transitioning');
@@ -314,14 +407,17 @@
                 }, 400);
             }
         },
+        
         scheduleVideo() {
             if (!this.video) return;
             if (this.videoTimeoutId) clearTimeout(this.videoTimeoutId);
             this.videoTimeoutId = setTimeout(() => this.showVideo(), 10000);
         },
+        
         showVideo() {
             if (this.video) this.video.classList.add('visible');
         },
+        
         hideVideo() {
             if (this.video) this.video.classList.remove('visible');
             if (this.videoTimeoutId) {
@@ -329,6 +425,7 @@
                 this.videoTimeoutId = null;
             }
         },
+        
         toggle() {
             if (State.isTransitioning) {
                 State.pendingTheme = State.theme === 'dark' ? 'light' : 'dark';
@@ -357,6 +454,7 @@
 
     const UI = {
         observer: null,
+        
         initIntersectionObserver() {
             if (this.observer) {
                 this.observer.disconnect();
@@ -377,10 +475,44 @@
                 rootMargin: `${CONFIG.LAZY_LOAD_OFFSET}px`,
                 threshold: 0.01
             });
+            
             document.querySelectorAll('.post').forEach(post => {
                 this.observer.observe(post);
             });
         },
+        
+        cacheDOM() {
+            const posts = document.querySelectorAll('.post');
+            if (posts.length === 0) return;
+            const fragment = document.createDocumentFragment();
+            posts.forEach(post => {
+                fragment.appendChild(post.cloneNode(true));
+            });
+            State.domCache = fragment;
+            State.scrollPosition = window.scrollY;
+        },
+        
+        restoreDOM() {
+            if (!State.domCache) return false;
+            const feed = document.getElementById('feed');
+            feed.innerHTML = '';
+            feed.appendChild(State.domCache.cloneNode(true));
+            
+            feed.querySelectorAll('.post').forEach(post => {
+                const originalPost = State.posts.get(Number(post.dataset.messageId));
+                if (originalPost) {
+                    post.dataset.mediaUrl = originalPost.media_url || '';
+                    post.dataset.mediaType = originalPost.media_type || '';
+                }
+                requestAnimationFrame(() => {
+                    post.classList.add('visible');
+                });
+            });
+            
+            this.initIntersectionObserver();
+            return true;
+        },
+        
         loadPostMedia(messageId) {
             const post = State.posts.get(messageId);
             if (!post || !post.has_media || post.media_url) return;
@@ -405,12 +537,15 @@
                 });
             });
         },
+        
         unloadPostMedia(messageId) {
             if (!CONFIG.IMAGE_UNLOAD_DISTANCE) return;
             const postEl = document.querySelector(`.post[data-message-id="${messageId}"]`);
             if (!postEl) return;
+            
             const rect = postEl.getBoundingClientRect();
             const viewportHeight = window.innerHeight;
+            
             if (rect.top > viewportHeight + CONFIG.IMAGE_UNLOAD_DISTANCE || rect.bottom < -CONFIG.IMAGE_UNLOAD_DISTANCE) {
                 const mediaContainer = postEl.querySelector('.media-container');
                 if (mediaContainer) {
@@ -431,6 +566,7 @@
                 }
             }
         },
+        
         trimOldPosts() {
             const posts = document.querySelectorAll('.post');
             if (posts.length > CONFIG.MAX_VISIBLE_POSTS) {
@@ -443,6 +579,7 @@
                 });
             }
         },
+        
         updateChannelInfo() {
             document.getElementById('channelTitle').textContent = CONFIG.CHANNEL_TITLE;
             document.getElementById('channelUsername').textContent = `@${CONFIG.CHANNEL_USERNAME}`;
@@ -451,10 +588,12 @@
                 avatarEl.innerHTML = `<img src="nekhebet.svg" style="width:54px; height:54px; object-fit:cover;" alt="Channel avatar" loading="lazy">`;
             }
         },
+        
         updateConnectionStatus(connected) {
             const dot = document.getElementById('statusDot');
             dot.classList.toggle('offline', !connected);
         },
+        
         updateNewPostsBadge() {
             const badge = document.getElementById('newPostsBadge');
             const countSpan = document.getElementById('newPostsCount');
@@ -465,6 +604,7 @@
                 badge.classList.add('hidden');
             }
         },
+        
         showSkeletonLoaders() {
             const feed = document.getElementById('feed');
             feed.innerHTML = '';
@@ -474,6 +614,7 @@
                 feed.appendChild(skeleton);
             }
         },
+        
         createPostElement(post) {
             const postEl = document.createElement('div');
             postEl.className = 'post';
@@ -528,22 +669,35 @@
             
             return postEl;
         },
+        
         renderMedia(url, type) {
             if (!url) return '';
             const fullUrl = url.startsWith('http') ? url : `${CONFIG.API_BASE}${url}`;
+            
             let isVideo = false;
             if (type) {
                 const typeStr = String(type).toLowerCase();
-                isVideo = typeStr.includes('video') || typeStr.includes('document') || 
-                         typeStr.includes('animation') || typeStr === 'messagemediadocument' || 
-                         typeStr.includes('gif') || typeStr.includes('mp4');
+                isVideo = typeStr.includes('video') || 
+                         typeStr.includes('document') || 
+                         typeStr.includes('animation') || 
+                         typeStr === 'messagemediadocument' || 
+                         typeStr.includes('gif') || 
+                         typeStr.includes('mp4') ||
+                         typeStr.includes('webm') ||
+                         typeStr.includes('mov');
             } else if (fullUrl.match(/\.(mp4|webm|mov|gif)$/i)) {
                 isVideo = true;
             }
+            
             if (isVideo) {
                 return `
                     <div class="media-container">
-                        <video src="${fullUrl}" controls preload="metadata" playsinline>
+                        <video 
+                            src="${fullUrl}" 
+                            controls 
+                            preload="metadata" 
+                            playsinline
+                            style="max-width:100%; max-height:500px; background:#000;">
                             Ваш браузер не поддерживает видео.
                         </video>
                     </div>
@@ -551,28 +705,39 @@
             } else {
                 return `
                     <div class="media-container">
-                        <img src="${fullUrl}" alt="Media" loading="lazy" decoding="async"
-                            onerror="this.onerror=null; this.parentElement.innerHTML='<div class=\\'media-error\\'>📷 Ошибка загрузки</div>';">
+                        <img
+                            src="${fullUrl}"
+                            alt="Media"
+                            loading="lazy"
+                            decoding="async"
+                            onerror="this.onerror=null; this.parentElement.innerHTML='<div class=\\'media-error\\'>📷 Ошибка загрузки изображения</div>';"
+                        >
                     </div>
                 `;
             }
         },
+        
         renderPosts(posts) {
             const feed = document.getElementById('feed');
             const fragment = document.createDocumentFragment();
+            
             posts.forEach(post => {
                 const postEl = this.createPostElement(post);
                 fragment.appendChild(postEl);
             });
+            
             feed.appendChild(fragment);
+            
             feed.querySelectorAll('.post').forEach(post => {
                 requestAnimationFrame(() => post.classList.add('visible'));
             });
+            
             if (this.observer) {
                 feed.querySelectorAll('.post').forEach(post => {
                     this.observer.observe(post);
                 });
             }
+            
             this.trimOldPosts();
             
             posts.forEach(post => {
@@ -581,31 +746,40 @@
                 }
             });
         },
+        
         addPostToTop(post) {
             const feed = document.getElementById('feed');
             const postEl = this.createPostElement(post);
+            
             if (feed.firstChild) {
                 feed.insertBefore(postEl, feed.firstChild);
             } else {
                 feed.appendChild(postEl);
             }
+            
             requestAnimationFrame(() => {
                 postEl.classList.add('visible', 'new');
             });
+            
             setTimeout(() => postEl.classList.remove('new'), 3000);
+            
             if (this.observer) {
                 this.observer.observe(postEl);
             }
+            
             this.trimOldPosts();
             
             if (post.has_media && !post.media_url) {
                 this.loadPostMedia(post.message_id);
             }
         },
+        
         updatePost(messageId, data) {
             const postEl = document.querySelector(`.post[data-message-id="${messageId}"]`);
             if (!postEl) return false;
+            
             let changed = false;
+            
             if (data.text !== undefined) {
                 const textEl = postEl.querySelector('.post-text');
                 if (textEl) {
@@ -613,6 +787,7 @@
                     changed = true;
                 }
             }
+            
             if (data.edit_date) {
                 const dateEl = postEl.querySelector('.post-date');
                 if (dateEl) {
@@ -623,33 +798,40 @@
                     changed = true;
                 }
             }
+            
             if (data.media_url) {
                 const mediaContainer = postEl.querySelector('.media-container, .media-loading, .media-unavailable');
                 if (mediaContainer) {
                     const newMedia = this.renderMedia(data.media_url, data.media_type);
                     if (newMedia) {
                         mediaContainer.outerHTML = newMedia;
+                        
                         const newMediaContainer = postEl.querySelector('.media-container');
                         if (newMediaContainer) {
                             newMediaContainer.addEventListener('click', () => {
                                 Lightbox.open(data.media_url, data.media_type);
                             });
                         }
+                        
                         postEl.dataset.mediaUrl = data.media_url;
                         postEl.dataset.mediaType = data.media_type || '';
                         changed = true;
                     }
                 }
             }
+            
             if (changed) {
                 postEl.classList.add('updated');
                 setTimeout(() => postEl.classList.remove('updated'), 2000);
             }
+            
             return changed;
         },
+        
         updatePostMediaUnavailable(messageId) {
             const postEl = document.querySelector(`.post[data-message-id="${messageId}"]`);
             if (!postEl) return false;
+            
             const mediaContainer = postEl.querySelector('.media-loading');
             if (mediaContainer) {
                 mediaContainer.outerHTML = '<div class="media-unavailable">📷 Медиа недоступно</div>';
@@ -657,15 +839,20 @@
                 if (post) post.media_unavailable = true;
                 return true;
             }
+            
             return false;
         },
+        
         deletePost(messageId) {
             const postEl = document.querySelector(`.post[data-message-id="${messageId}"]`);
             if (!postEl) return false;
+            
             if (this.observer) {
                 this.observer.unobserve(postEl);
             }
+            
             postEl.classList.add('deleted');
+            
             setTimeout(() => {
                 postEl.remove();
                 State.posts.delete(messageId);
@@ -673,18 +860,22 @@
                 if (index !== -1) State.postOrder.splice(index, 1);
                 API.cancelMediaPoll(messageId);
             }, 300);
+            
             return true;
         },
+        
         setLoaderVisible(visible) {
             const trigger = document.getElementById('infiniteScrollTrigger');
             if (trigger) {
                 trigger.textContent = visible ? 'Загрузка...' : '↓ Загрузить ещё';
             }
         },
+        
         showScrollTopButton(visible) {
             const btn = document.getElementById('scrollTopBtn');
             if (btn) btn.style.display = visible ? 'flex' : 'none';
         },
+        
         cleanup() {
             if (this.observer) {
                 this.observer.disconnect();
@@ -701,12 +892,15 @@
             const content = document.getElementById('lightboxContent');
             const fullUrl = url.startsWith('http') ? url : `${CONFIG.API_BASE}${url}`;
             const isVideo = type === 'video' || type === 'Video' || url.match(/\.(mp4|webm|mov)$/i);
+            
             content.innerHTML = isVideo
                 ? `<video src="${fullUrl}" controls autoplay playsinline></video>`
                 : `<img src="${fullUrl}" alt="Media">`;
+            
             lightbox.classList.add('active');
             document.body.style.overflow = 'hidden';
         },
+        
         close() {
             const lightbox = document.getElementById('lightbox');
             lightbox.classList.remove('active');
@@ -718,7 +912,9 @@
     const MessageLoader = {
         async loadMessages(reset = false) {
             if (State.isLoading) return;
+            
             if (reset) {
+                UI.cacheDOM(); // Cache current DOM before clearing
                 UI.cleanup();
                 State.posts.clear();
                 State.postOrder = [];
@@ -727,17 +923,22 @@
                 State.hasMore = true;
                 API.clearMediaCache();
             }
+            
             if (!State.hasMore) {
                 document.getElementById('infiniteScrollTrigger').style.display = 'none';
                 return;
             }
+            
             State.isLoading = true;
             UI.setLoaderVisible(true);
+            
             try {
                 const data = await API.fetchMessages(State.offset, CONFIG.INITIAL_LIMIT);
+                
                 if (data.messages && data.messages.length > 0) {
                     State.hasMore = data.hasMore !== false;
                     State.offset += data.messages.length;
+                    
                     const newMessages = [];
                     data.messages.forEach(post => {
                         if (!State.posts.has(post.message_id)) {
@@ -746,9 +947,44 @@
                             newMessages.push(post);
                         }
                     });
+                    
                     if (newMessages.length > 0) {
                         UI.renderPosts(newMessages);
                     }
+                    
+                    // Load media for new messages
+                    data.messages.forEach(post => {
+                        if (post.has_media) {
+                            API.fetchMedia(post.message_id).then(mediaInfo => {
+                                if (mediaInfo && mediaInfo.url) {
+                                    post.media_url = mediaInfo.url;
+                                    post.media_type = mediaInfo.file_type || post.media_type;
+                                    UI.updatePost(post.message_id, {
+                                        media_url: mediaInfo.url,
+                                        media_type: post.media_type
+                                    });
+                                } else {
+                                    API.pollMedia(post.message_id, (url, failed) => {
+                                        if (url) {
+                                            post.media_url = url;
+                                            UI.updatePost(post.message_id, { media_url: url });
+                                        } else if (failed) {
+                                            UI.updatePostMediaUnavailable(post.message_id);
+                                        }
+                                    });
+                                }
+                            }).catch(() => {
+                                API.pollMedia(post.message_id, (url, failed) => {
+                                    if (url) {
+                                        post.media_url = url;
+                                        UI.updatePost(post.message_id, { media_url: url });
+                                    } else if (failed) {
+                                        UI.updatePostMediaUnavailable(post.message_id);
+                                    }
+                                });
+                            });
+                        }
+                    });
                 } else {
                     State.hasMore = false;
                 }
@@ -758,6 +994,7 @@
                 UI.setLoaderVisible(false);
             }
         },
+        
         async loadInitial() {
             UI.showSkeletonLoaders();
             await this.loadMessages(true);
@@ -769,11 +1006,14 @@
         show(message, type = 'info', duration = 3000) {
             const container = document.getElementById('toastContainer');
             if (!container) return;
+            
             const toast = document.createElement('div');
             toast.className = `toast ${type}`;
             const icons = { info: 'ℹ️', success: '✅', warning: '⚠️', error: '❌' };
             toast.innerHTML = `${icons[type] || 'ℹ️'} ${message}`;
+            
             container.appendChild(toast);
+            
             setTimeout(() => {
                 toast.style.opacity = '0';
                 toast.style.transform = 'translate(-50%, 20px)';
@@ -790,60 +1030,74 @@
         connect() {
             try {
                 State.ws = new WebSocket(CONFIG.WS_BASE);
+                
                 State.ws.onopen = () => {
                     State.wsConnected = true;
                     State.wsReconnectAttempts = 0;
                     UI.updateConnectionStatus(true);
                     Toast.success('Подключено к серверу');
+                    
                     setInterval(() => {
                         if (State.ws && State.ws.readyState === WebSocket.OPEN) {
                             State.ws.send(JSON.stringify({ type: 'ping' }));
                         }
                     }, 30000);
                 };
+                
                 State.ws.onmessage = (event) => {
                     State.wsMessageQueue.push(event.data);
                     this.processQueue();
                 };
+                
                 State.ws.onclose = () => {
                     State.wsConnected = false;
                     UI.updateConnectionStatus(false);
                     Toast.warning('Отключено от сервера');
                     this.reconnect();
                 };
+                
                 State.ws.onerror = () => {};
             } catch (err) {
                 this.reconnect();
             }
         },
+        
         async processQueue() {
             if (State.wsProcessing) return;
             State.wsProcessing = true;
+            
             while (State.wsMessageQueue.length > 0) {
                 const data = JSON.parse(State.wsMessageQueue.shift());
                 await this.handleMessage(data);
             }
+            
             State.wsProcessing = false;
         },
+        
         async handleMessage(data) {
             if (['ping', 'pong', 'welcome', 'heartbeat', 'buffering', 'flush_start', 'flush_complete'].includes(data.type)) return;
             if (data.channel_id !== parseInt(CONFIG.CHANNEL_ID)) return;
+            
             const messageKey = `${data.channel_id}-${data.message_id}`;
             const lastReceived = State.recentMessages.get(messageKey);
             if (lastReceived && (Date.now() - lastReceived < CONFIG.DEDUP_TTL)) return;
+            
             State.recentMessages.set(messageKey, Date.now());
+            
             if (State.recentMessages.size > 100) {
                 const now = Date.now();
                 for (const [key, time] of State.recentMessages.entries()) {
                     if (now - time > CONFIG.DEDUP_TTL) State.recentMessages.delete(key);
                 }
             }
+            
             switch (data.type) {
                 case 'new': this.handleNewMessage(data); break;
                 case 'edit': this.handleEditMessage(data); break;
                 case 'delete': this.handleDeleteMessage(data); break;
             }
         },
+        
         reconnect() {
             if (State.wsReconnectAttempts >= CONFIG.MAX_RECONNECT_ATTEMPTS) return;
             State.wsReconnectAttempts++;
@@ -852,6 +1106,67 @@
                 if (!State.wsConnected) this.connect();
             }, delay);
         },
+        
+        handleMediaForMessage(post, data) {
+            if (data.media_type) {
+                post.media_type = data.media_type;
+            }
+            
+            if (data.media_url) {
+                post.media_url = data.media_url;
+                const existingPost = document.querySelector(`.post[data-message-id="${data.message_id}"]`);
+                if (existingPost) {
+                    UI.updatePost(data.message_id, {
+                        media_url: data.media_url,
+                        media_type: data.media_type || post.media_type
+                    });
+                }
+            } else {
+                API.fetchMedia(data.message_id).then(mediaInfo => {
+                    if (mediaInfo && mediaInfo.url) {
+                        post.media_url = mediaInfo.url;
+                        post.media_type = mediaInfo.file_type || post.media_type;
+                        const existingPost = document.querySelector(`.post[data-message-id="${data.message_id}"]`);
+                        if (existingPost) {
+                            UI.updatePost(data.message_id, {
+                                media_url: mediaInfo.url,
+                                media_type: post.media_type
+                            });
+                        }
+                    } else {
+                        API.pollMedia(data.message_id, (url, failed) => {
+                            if (url) {
+                                post.media_url = url;
+                                const existingPost = document.querySelector(`.post[data-message-id="${data.message_id}"]`);
+                                if (existingPost) {
+                                    UI.updatePost(data.message_id, {
+                                        media_url: url,
+                                        media_type: post.media_type
+                                    });
+                                }
+                            } else if (failed) {
+                                const existingPost = document.querySelector(`.post[data-message-id="${data.message_id}"]`);
+                                if (existingPost) UI.updatePostMediaUnavailable(data.message_id);
+                            }
+                        });
+                    }
+                }).catch(() => {
+                    API.pollMedia(data.message_id, (url, failed) => {
+                        if (url) {
+                            post.media_url = url;
+                            const existingPost = document.querySelector(`.post[data-message-id="${data.message_id}"]`);
+                            if (existingPost) {
+                                UI.updatePost(data.message_id, {
+                                    media_url: url,
+                                    media_type: post.media_type
+                                });
+                            }
+                        }
+                    });
+                });
+            }
+        },
+        
         handleNewMessage(data) {
             if (State.posts.has(data.message_id)) return;
             
@@ -875,45 +1190,15 @@
             State.newPosts.push(post);
             UI.updateNewPostsBadge();
             
-            if (hasMedia && !data.media_url) {
-                this.loadMediaForPost(data.message_id);
+            if (hasMedia) {
+                this.handleMediaForMessage(post, data);
             }
             
             if (window.scrollY < 200) {
                 this.flushNewPosts();
             }
         },
-        loadMediaForPost(messageId) {
-            API.fetchMedia(messageId).then(mediaInfo => {
-                if (mediaInfo && mediaInfo.url) {
-                    const post = State.posts.get(messageId);
-                    if (post) {
-                        post.media_url = mediaInfo.url;
-                        post.media_type = mediaInfo.file_type || post.media_type;
-                        if (document.querySelector(`.post[data-message-id="${messageId}"]`)) {
-                            UI.updatePost(messageId, {
-                                media_url: mediaInfo.url,
-                                media_type: post.media_type
-                            });
-                        }
-                    }
-                } else {
-                    API.pollMedia(messageId, (url, failed) => {
-                        if (url) {
-                            const post = State.posts.get(messageId);
-                            if (post) {
-                                post.media_url = url;
-                                if (document.querySelector(`.post[data-message-id="${messageId}"]`)) {
-                                    UI.updatePost(messageId, { media_url: url });
-                                }
-                            }
-                        } else if (failed) {
-                            UI.updatePostMediaUnavailable(messageId);
-                        }
-                    });
-                }
-            });
-        },
+        
         handleEditMessage(data) {
             if (State.posts.has(data.message_id)) {
                 const post = State.posts.get(data.message_id);
@@ -924,14 +1209,17 @@
                 post.edit_date = data.edit_date;
                 State.posts.set(data.message_id, post);
             }
+            
             UI.updatePost(data.message_id, {
                 text: data.text,
                 edit_date: data.edit_date,
                 media_url: data.media_url,
                 media_type: data.media_type
             });
+            
             Toast.info('Сообщение обновлено');
         },
+        
         handleDeleteMessage(data) {
             State.posts.delete(data.message_id);
             const index = State.postOrder.indexOf(data.message_id);
@@ -940,14 +1228,17 @@
             API.cancelMediaPoll(data.message_id);
             Toast.warning('Сообщение удалено');
         },
+        
         flushNewPosts() {
             if (State.newPosts.length === 0) return;
+            
             while (State.newPosts.length > 0) {
                 const post = State.newPosts.shift();
                 UI.addPostToTop(post);
                 State.posts.set(post.message_id, post);
                 State.postOrder.unshift(post.message_id);
             }
+            
             UI.updateNewPostsBadge();
         }
     };
@@ -955,21 +1246,27 @@
     const ScrollHandler = {
         init() {
             State.lastDocumentHeight = document.documentElement.scrollHeight;
+            
             const resizeObserver = new ResizeObserver(() => {
                 State.lastDocumentHeight = document.documentElement.scrollHeight;
             });
             resizeObserver.observe(document.documentElement);
+            
             window.addEventListener('scroll', this.throttledHandle.bind(this), { passive: true });
         },
+        
         handle(scrollY) {
             UI.showScrollTopButton(scrollY > 500);
+            
             if (scrollY + window.innerHeight >= State.lastDocumentHeight - 500) {
                 this.debouncedLoadMore();
             }
+            
             if (scrollY < 200 && State.newPosts.length > 0) {
                 WebSocketManager.flushNewPosts();
             }
         },
+        
         throttledHandle: (() => {
             let ticking = false;
             let lastScrollY = 0;
@@ -984,6 +1281,7 @@
                 }
             };
         })(),
+        
         debouncedLoadMore: debounce(() => {
             if (!State.isLoading && State.hasMore) {
                 MessageLoader.loadMessages();
@@ -994,7 +1292,12 @@
     function init() {
         ThemeManager.init();
         UI.updateChannelInfo();
-        MessageLoader.loadInitial();
+        
+        // Try to restore cached DOM first
+        if (!UI.restoreDOM()) {
+            MessageLoader.loadInitial();
+        }
+        
         WebSocketManager.connect();
         ScrollHandler.init();
 
@@ -1009,21 +1312,31 @@
         });
 
         document.getElementById('channelAvatar').addEventListener('click', () => ThemeManager.toggle());
+        
         document.getElementById('newPostsBadge').addEventListener('click', () => {
             window.scrollTo({ top: 0, behavior: 'smooth' });
             WebSocketManager.flushNewPosts();
         });
+        
         document.getElementById('scrollTopBtn').addEventListener('click', () => {
             window.scrollTo({ top: 0, behavior: 'smooth' });
         });
+        
         document.getElementById('lightboxClose').addEventListener('click', Lightbox.close);
+        
         document.getElementById('lightbox').addEventListener('click', (e) => {
             if (e.target === document.getElementById('lightbox')) Lightbox.close();
         });
+        
         document.addEventListener('visibilitychange', () => {
             if (!document.hidden && State.newPosts.length > 0) {
                 WebSocketManager.flushNewPosts();
             }
+        });
+        
+        // Cache DOM before page unload
+        window.addEventListener('beforeunload', () => {
+            UI.cacheDOM();
         });
     }
 
