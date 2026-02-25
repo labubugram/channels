@@ -631,8 +631,8 @@
                 mediaHTML = this.renderMedia(post.media_url, post.media_type);
             } else if (post.has_media) {
                 mediaHTML = post.media_unavailable
-                    ? '<div class="media-unavailable">📷 Медиа недоступно</div>'
-                    : '<div class="media-loading">📷 Загрузка медиа...</div>';
+                    ? '<div class="media-unavailable">Медиа недоступно</div>'
+                    : '<div class="media-loading"><img src="/channels/core/loader.svg" alt="Загрузка" class="media-loader"></div>';
             }
             
             postEl.innerHTML = `
