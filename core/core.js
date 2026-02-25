@@ -107,7 +107,6 @@
             if (!text) return '';
             let escaped = Security.escapeHtml(text);
             
-            // Markdown-style links
             escaped = escaped.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (match, linkText, url) => {
                 const safeUrl = Security.sanitizeUrl(url);
                 if (safeUrl === '#') return match;
@@ -121,7 +120,6 @@
                 return `<a href="${safeUrl}" target="_blank" rel="noopener noreferrer nofollow" class="tg-link" title="${url}" data-domain="${domain}">${linkText}</a>`;
             });
 
-            // Handle entities if provided
             if (entities && entities.length > 0) {
                 const sortedEntities = [...entities].sort((a, b) => b.offset - a.offset);
                 for (const entity of sortedEntities) {
@@ -173,7 +171,6 @@
                     }
                 }
             } else {
-                // Fallback to regex-based formatting
                 escaped = escaped.replace(/```([\s\S]*?)```/g, '<pre class="tg-code-block"><code>$1</code></pre>');
                 escaped = escaped.replace(/`([^`]+)`/g, '<code class="tg-inline-code">$1</code>');
                 
@@ -192,7 +189,6 @@
                 }
             }
 
-            // Auto-link URLs
             escaped = escaped.replace(/(?<!href="|">)(https?:\/\/[^\s<"')]+)(?![^<]*>)/g, (url) => {
                 const safeUrl = Security.sanitizeUrl(url);
                 if (safeUrl === '#') return url;
@@ -210,16 +206,13 @@
                 return `<a href="${safeUrl}" target="_blank" rel="noopener noreferrer nofollow" class="tg-link" data-domain="${displayDomain}" title="${url}">${displayText}</a>`;
             });
 
-            // Quotes
             escaped = escaped.replace(/^&gt;&gt;&gt; (.*)$/gm, '<blockquote class="tg-quote level-3">$1</blockquote>');
             escaped = escaped.replace(/^&gt;&gt; (.*)$/gm, '<blockquote class="tg-quote level-2">$1</blockquote>');
             escaped = escaped.replace(/^&gt; (.*)$/gm, '<blockquote class="tg-quote level-1">$1</blockquote>');
 
-            // Mentions and hashtags
             escaped = escaped.replace(/(?<!>|href=")@(\w+)(?!<)/g, '<span class="tg-mention" data-mention="@$1" title="@$1 в Telegram">@$1</span>');
             escaped = escaped.replace(/(?<!>|href=")#(\w+)(?!<)/g, '<span class="tg-hashtag" data-hashtag="#$1">#$1</span>');
 
-            // Line breaks
             const lines = escaped.split('\n');
             for (let i = 0; i < lines.length; i++) {
                 if (i < lines.length - 1 && !lines[i].match(/<[^>]+>$/)) {
@@ -914,7 +907,7 @@
             if (State.isLoading) return;
             
             if (reset) {
-                UI.cacheDOM(); // Cache current DOM before clearing
+                UI.cacheDOM();
                 UI.cleanup();
                 State.posts.clear();
                 State.postOrder = [];
@@ -952,7 +945,6 @@
                         UI.renderPosts(newMessages);
                     }
                     
-                    // Load media for new messages
                     data.messages.forEach(post => {
                         if (post.has_media) {
                             API.fetchMedia(post.message_id).then(mediaInfo => {
@@ -1095,6 +1087,7 @@
                 case 'new': this.handleNewMessage(data); break;
                 case 'edit': this.handleEditMessage(data); break;
                 case 'delete': this.handleDeleteMessage(data); break;
+                case 'media_update': this.handleMediaUpdate(data); break;
             }
         },
         
@@ -1199,6 +1192,24 @@
             }
         },
         
+        handleMediaUpdate(data) {
+            const post = State.posts.get(data.message_id);
+            if (!post) return;
+            
+            if (data.media_url) {
+                post.media_url = data.media_url;
+            }
+            
+            if (data.media_info) {
+                post.media_type = data.media_info.file_type || post.media_type;
+            }
+            
+            UI.updatePost(data.message_id, {
+                media_url: data.media_url,
+                media_type: post.media_type
+            });
+        },
+        
         handleEditMessage(data) {
             if (State.posts.has(data.message_id)) {
                 const post = State.posts.get(data.message_id);
@@ -1293,7 +1304,6 @@
         ThemeManager.init();
         UI.updateChannelInfo();
         
-        // Try to restore cached DOM first
         if (!UI.restoreDOM()) {
             MessageLoader.loadInitial();
         }
@@ -1334,7 +1344,6 @@
             }
         });
         
-        // Cache DOM before page unload
         window.addEventListener('beforeunload', () => {
             UI.cacheDOM();
         });
