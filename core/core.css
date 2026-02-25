@@ -423,7 +423,7 @@ body {
     max-height: 500px;
     object-fit: contain;
     display: block;
-    background: #000;
+    background: #282c3000;
 }
 
 .media-container video {
