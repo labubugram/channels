@@ -114,14 +114,16 @@
     -webkit-tap-highlight-color: transparent;
 }
 
+.media-loading {
+    display: flex !important;
+    align-items: center;
+    justify-content: center;
+
+}
+
 .media-loader {
     width: 28px;
     height: 28px;
-    animation: spin 1.2s linear infinite;
-}
-
-@keyframes spin {
-    to { transform: rotate(360deg); }
 }
 
 body {
