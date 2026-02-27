@@ -10,8 +10,8 @@
         INITIAL_LIMIT: 20,
         MAX_RECONNECT_ATTEMPTS: 10,
         RECONNECT_BASE_DELAY: 1000,
-        MEDIA_POLL_INTERVAL: 3000,
-        MAX_MEDIA_POLL_ATTEMPTS: 20,
+        MEDIA_POLL_INTERVAL: 5000,
+        MAX_MEDIA_POLL_ATTEMPTS: 12,
         MAX_VISIBLE_POSTS: 100,
         LAZY_LOAD_OFFSET: 500,
         IMAGE_UNLOAD_DISTANCE: 1000,
@@ -45,9 +45,7 @@
         wsMessageQueue: [],
         wsProcessing: false,
         domCache: null,
-        scrollPosition: 0,
-        s3Enabled: false,
-        s3PublicUrl: null
+        scrollPosition: 0
     };
 
     const Security = {
@@ -61,7 +59,6 @@
                 .replace(/`/g, "&#96;");
         },
         sanitizeUrl(url) {
-            if (!url) return '#';
             try {
                 const parsed = new URL(url);
                 if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return '#';
@@ -258,20 +255,6 @@
     };
 
     const API = {
-        async fetchS3Config() {
-            try {
-                const response = await fetch(`${CONFIG.API_BASE}/api/s3/config`);
-                if (!response.ok) throw new Error(`HTTP ${response.status}`);
-                const data = await response.json();
-                State.s3Enabled = data.enabled;
-                State.s3PublicUrl = data.public_url;
-                return data;
-            } catch (err) {
-                State.s3Enabled = false;
-                return { enabled: false };
-            }
-        },
-
         async fetchMessages(offset = 0, limit = CONFIG.INITIAL_LIMIT) {
             try {
                 const response = await fetch(`${CONFIG.API_BASE}/api/channel/posts?channel_id=${CONFIG.CHANNEL_ID}&offset=${offset}&limit=${limit}`);
@@ -304,12 +287,6 @@
                 let url = `${CONFIG.API_BASE}/api/media/by-message/${messageId}`;
                 url += `?channel_id=${CONFIG.CHANNEL_ID}`;
                 const response = await fetch(url);
-                
-                if (response.status === 202) {
-                    // Медиа в процессе загрузки
-                    const data = await response.json();
-                    return { pending: true, media_id: data.media_id };
-                }
                 
                 if (!response.ok) {
                     if (response.status === 404) return null;
@@ -354,14 +331,6 @@
                             State.mediaPollingQueue.delete(messageId);
                         }
                         callback(mediaInfo.url, false);
-                    } else if (mediaInfo && mediaInfo.pending) {
-                        // Все еще в процессе загрузки, продолжаем опрос
-                        if (State.mediaPollingQueue.has(messageId)) {
-                            const { timeoutId } = State.mediaPollingQueue.get(messageId);
-                            if (timeoutId) clearTimeout(timeoutId);
-                        }
-                        const timeoutId = setTimeout(() => poll(attempt + 1), CONFIG.MEDIA_POLL_INTERVAL);
-                        State.mediaPollingQueue.set(messageId, { attempts: attempt, timeoutId });
                     } else {
                         if (State.mediaPollingQueue.has(messageId)) {
                             const { timeoutId } = State.mediaPollingQueue.get(messageId);
@@ -527,7 +496,6 @@
                 if (originalPost) {
                     post.dataset.mediaUrl = originalPost.media_url || '';
                     post.dataset.mediaType = originalPost.media_type || '';
-                    post.dataset.mediaPending = originalPost.media_pending ? 'true' : 'false';
                 }
                 requestAnimationFrame(() => {
                     post.classList.add('visible');
@@ -549,18 +517,6 @@
                     this.updatePost(messageId, {
                         media_url: mediaInfo.url,
                         media_type: post.media_type
-                    });
-                } else if (mediaInfo && mediaInfo.pending) {
-                    // Медиа в процессе загрузки, показываем индикатор
-                    this.updatePostMediaPending(messageId);
-                } else {
-                    API.pollMedia(messageId, (url, failed) => {
-                        if (url) {
-                            post.media_url = url;
-                            this.updatePost(messageId, { media_url: url });
-                        } else if (failed) {
-                            this.updatePostMediaUnavailable(messageId);
-                        }
                     });
                 }
             }).catch(() => {
@@ -658,7 +614,6 @@
             postEl.dataset.messageId = post.message_id;
             postEl.dataset.mediaUrl = post.media_url || '';
             postEl.dataset.mediaType = post.media_type || '';
-            postEl.dataset.mediaPending = post.media_pending ? 'true' : 'false';
             
             const date = Formatters.formatDate(post.date);
             const views = Formatters.formatViews(post.views);
@@ -668,13 +623,9 @@
             if (post.media_url) {
                 mediaHTML = this.renderMedia(post.media_url, post.media_type);
             } else if (post.has_media) {
-                if (post.media_pending) {
-                    mediaHTML = '<div class="media-pending"><div class="media-pending-spinner"></div><span>Медиа загружается...</span></div>';
-                } else if (post.media_unavailable) {
-                    mediaHTML = '<div class="media-unavailable">📷 Медиа недоступно</div>';
-                } else {
-                    mediaHTML = '<div class="media-loading"><img src="/channels/core/loader.svg" alt="Загрузка" class="media-loader"></div>';
-                }
+                mediaHTML = post.media_unavailable
+                    ? '<div class="media-unavailable">Медиа недоступно</div>'
+                    : '<div class="media-loading"><img src="/channels/core/loader.svg" alt="Загрузка" class="media-loader"></div>';
             }
             
             postEl.innerHTML = `
@@ -702,8 +653,8 @@
                 </div>
             `;
             
-            const mediaContainer = postEl.querySelector('.media-container, .media-pending');
-            if (mediaContainer && post.media_url) {
+            const mediaContainer = postEl.querySelector('.media-container');
+            if (mediaContainer) {
                 mediaContainer.addEventListener('click', () => {
                     Lightbox.open(post.media_url, post.media_type);
                 });
@@ -842,7 +793,7 @@
             }
             
             if (data.media_url) {
-                const mediaContainer = postEl.querySelector('.media-container, .media-loading, .media-pending, .media-unavailable');
+                const mediaContainer = postEl.querySelector('.media-container, .media-loading, .media-unavailable');
                 if (mediaContainer) {
                     const newMedia = this.renderMedia(data.media_url, data.media_type);
                     if (newMedia) {
@@ -857,7 +808,6 @@
                         
                         postEl.dataset.mediaUrl = data.media_url;
                         postEl.dataset.mediaType = data.media_type || '';
-                        postEl.dataset.mediaPending = 'false';
                         changed = true;
                     }
                 }
@@ -871,32 +821,15 @@
             return changed;
         },
         
-        updatePostMediaPending(messageId) {
-            const postEl = document.querySelector(`.post[data-message-id="${messageId}"]`);
-            if (!postEl) return false;
-            
-            const mediaContainer = postEl.querySelector('.media-loading, .media-unavailable');
-            if (mediaContainer) {
-                mediaContainer.outerHTML = '<div class="media-pending"><div class="media-pending-spinner"></div><span>Медиа загружается...</span></div>';
-                const post = State.posts.get(Number(messageId));
-                if (post) post.media_pending = true;
-                postEl.dataset.mediaPending = 'true';
-                return true;
-            }
-            
-            return false;
-        },
-        
         updatePostMediaUnavailable(messageId) {
             const postEl = document.querySelector(`.post[data-message-id="${messageId}"]`);
             if (!postEl) return false;
             
-            const mediaContainer = postEl.querySelector('.media-loading, .media-pending');
+            const mediaContainer = postEl.querySelector('.media-loading');
             if (mediaContainer) {
                 mediaContainer.outerHTML = '<div class="media-unavailable">📷 Медиа недоступно</div>';
                 const post = State.posts.get(Number(messageId));
                 if (post) post.media_unavailable = true;
-                postEl.dataset.mediaPending = 'false';
                 return true;
             }
             
@@ -1022,16 +955,6 @@
                                         media_url: mediaInfo.url,
                                         media_type: post.media_type
                                     });
-                                } else if (mediaInfo && mediaInfo.pending) {
-                                    UI.updatePostMediaPending(post.message_id);
-                                    API.pollMedia(post.message_id, (url, failed) => {
-                                        if (url) {
-                                            post.media_url = url;
-                                            UI.updatePost(post.message_id, { media_url: url });
-                                        } else if (failed) {
-                                            UI.updatePostMediaUnavailable(post.message_id);
-                                        }
-                                    });
                                 } else {
                                     API.pollMedia(post.message_id, (url, failed) => {
                                         if (url) {
@@ -1065,7 +988,6 @@
         },
         
         async loadInitial() {
-            await API.fetchS3Config();
             UI.showSkeletonLoaders();
             await this.loadMessages(true);
             UI.initIntersectionObserver();
@@ -1107,6 +1029,7 @@
                     UI.updateConnectionStatus(true);
                     Toast.success('Подключено к серверу');
                     
+                    // Отправляем ping каждые 30 секунд
                     setInterval(() => {
                         if (State.ws && State.ws.readyState === WebSocket.OPEN) {
                             State.ws.send(JSON.stringify({ type: 'ping' }));
@@ -1115,8 +1038,12 @@
                 };
                 
                 State.ws.onmessage = (event) => {
-                    State.wsMessageQueue.push(event.data);
-                    this.processQueue();
+                    try {
+                        const data = JSON.parse(event.data);
+                        this.handleMessage(data);
+                    } catch (err) {
+                        console.error('Error parsing WebSocket message:', err);
+                    }
                 };
                 
                 State.ws.onclose = () => {
@@ -1126,34 +1053,35 @@
                     this.reconnect();
                 };
                 
-                State.ws.onerror = () => {};
+                State.ws.onerror = (err) => {
+                    console.error('WebSocket error:', err);
+                };
             } catch (err) {
+                console.error('WebSocket connection error:', err);
                 this.reconnect();
             }
         },
         
-        async processQueue() {
-            if (State.wsProcessing) return;
-            State.wsProcessing = true;
-            
-            while (State.wsMessageQueue.length > 0) {
-                const data = JSON.parse(State.wsMessageQueue.shift());
-                await this.handleMessage(data);
+        async handleMessage(data) {
+            // Игнорируем служебные сообщения
+            if (['ping', 'pong', 'welcome', 'heartbeat', 'buffering', 'flush_start', 'flush_complete'].includes(data.type)) {
+                return;
             }
             
-            State.wsProcessing = false;
-        },
-        
-        async handleMessage(data) {
-            if (['ping', 'pong', 'welcome', 'heartbeat', 'buffering', 'flush_start', 'flush_complete'].includes(data.type)) return;
+            // Проверяем, относится ли сообщение к нашему каналу
             if (data.channel_id !== parseInt(CONFIG.CHANNEL_ID)) return;
             
+            // Дедупликация сообщений
             const messageKey = `${data.channel_id}-${data.message_id}`;
             const lastReceived = State.recentMessages.get(messageKey);
-            if (lastReceived && (Date.now() - lastReceived < CONFIG.DEDUP_TTL)) return;
+            if (lastReceived && (Date.now() - lastReceived < CONFIG.DEDUP_TTL)) {
+                console.log('Duplicate message ignored:', messageKey);
+                return;
+            }
             
             State.recentMessages.set(messageKey, Date.now());
             
+            // Очистка старых записей
             if (State.recentMessages.size > 100) {
                 const now = Date.now();
                 for (const [key, time] of State.recentMessages.entries()) {
@@ -1161,109 +1089,32 @@
                 }
             }
             
-            switch (data.type) {
-                case 'new': this.handleNewMessage(data); break;
-                case 'edit': this.handleEditMessage(data); break;
-                case 'delete': this.handleDeleteMessage(data); break;
-                case 'media_ready': this.handleMediaReady(data); break;
-            }
-        },
-        
-        reconnect() {
-            if (State.wsReconnectAttempts >= CONFIG.MAX_RECONNECT_ATTEMPTS) return;
-            State.wsReconnectAttempts++;
-            const delay = Math.min(CONFIG.RECONNECT_BASE_DELAY * Math.pow(2, State.wsReconnectAttempts), 30000);
-            setTimeout(() => {
-                if (!State.wsConnected) this.connect();
-            }, delay);
-        },
-        
-        handleMediaForMessage(post, data) {
-            if (data.media_type) {
-                post.media_type = data.media_type;
-            }
+            console.log('WebSocket message received:', data.type, data);
             
-            if (data.media_url) {
-                post.media_url = data.media_url;
-                const existingPost = document.querySelector(`.post[data-message-id="${data.message_id}"]`);
-                if (existingPost) {
-                    UI.updatePost(data.message_id, {
-                        media_url: data.media_url,
-                        media_type: data.media_type || post.media_type
-                    });
-                }
-            } else if (data.media_pending) {
-                post.media_pending = true;
-                const existingPost = document.querySelector(`.post[data-message-id="${data.message_id}"]`);
-                if (existingPost) {
-                    UI.updatePostMediaPending(data.message_id);
-                }
-            } else {
-                API.fetchMedia(data.message_id).then(mediaInfo => {
-                    if (mediaInfo && mediaInfo.url) {
-                        post.media_url = mediaInfo.url;
-                        post.media_type = mediaInfo.file_type || post.media_type;
-                        const existingPost = document.querySelector(`.post[data-message-id="${data.message_id}"]`);
-                        if (existingPost) {
-                            UI.updatePost(data.message_id, {
-                                media_url: mediaInfo.url,
-                                media_type: post.media_type
-                            });
-                        }
-                    } else if (mediaInfo && mediaInfo.pending) {
-                        post.media_pending = true;
-                        const existingPost = document.querySelector(`.post[data-message-id="${data.message_id}"]`);
-                        if (existingPost) {
-                            UI.updatePostMediaPending(data.message_id);
-                        }
-                        API.pollMedia(data.message_id, (url, failed) => {
-                            if (url) {
-                                post.media_url = url;
-                                const existingPost = document.querySelector(`.post[data-message-id="${data.message_id}"]`);
-                                if (existingPost) {
-                                    UI.updatePost(data.message_id, {
-                                        media_url: url,
-                                        media_type: post.media_type
-                                    });
-                                }
-                            } else if (failed) {
-                                const existingPost = document.querySelector(`.post[data-message-id="${data.message_id}"]`);
-                                if (existingPost) UI.updatePostMediaUnavailable(data.message_id);
-                            }
-                        });
-                    } else {
-                        API.pollMedia(data.message_id, (url, failed) => {
-                            if (url) {
-                                post.media_url = url;
-                                const existingPost = document.querySelector(`.post[data-message-id="${data.message_id}"]`);
-                                if (existingPost) {
-                                    UI.updatePost(data.message_id, {
-                                        media_url: url,
-                                        media_type: post.media_type
-                                    });
-                                }
-                            }
-                        });
-                    }
-                }).catch(() => {
-                    API.pollMedia(data.message_id, (url, failed) => {
-                        if (url) {
-                            post.media_url = url;
-                            const existingPost = document.querySelector(`.post[data-message-id="${data.message_id}"]`);
-                            if (existingPost) {
-                                UI.updatePost(data.message_id, {
-                                    media_url: url,
-                                    media_type: post.media_type
-                                });
-                            }
-                        }
-                    });
-                });
+            switch (data.type) {
+                case 'new':
+                    this.handleNewMessage(data);
+                    break;
+                case 'edit':
+                    this.handleEditMessage(data);
+                    break;
+                case 'delete':
+                    this.handleDeleteMessage(data);
+                    break;
+                case 'media_ready':
+                    this.handleMediaReady(data);
+                    break;
+                default:
+                    console.log('Unknown message type:', data.type);
             }
         },
         
         handleNewMessage(data) {
-            if (State.posts.has(data.message_id)) return;
+            // Проверяем, нет ли уже такого сообщения
+            if (State.posts.has(data.message_id)) {
+                console.log('Message already exists:', data.message_id);
+                return;
+            }
             
             const hasMedia = !!(data.media_type || data.media_url);
             let mediaType = data.media_type;
@@ -1279,40 +1130,54 @@
                 has_media: hasMedia,
                 media_type: mediaType,
                 media_url: data.media_url,
-                media_pending: data.media_pending || false,
+                media_pending: data.media_pending || (hasMedia && !data.media_url),
                 is_edited: false
             };
             
-            State.newPosts.push(post);
-            UI.updateNewPostsBadge();
-            
-            if (hasMedia && !data.media_url) {
-                this.handleMediaForMessage(post, data);
+            // ВАЖНО: Добавляем пост в начало ленты СРАЗУ
+            if (window.scrollY < 200) {
+                // Если пользователь вверху страницы - показываем сразу
+                console.log('Adding new post immediately:', post.message_id);
+                UI.addPostToTop(post);
+                State.posts.set(post.message_id, post);
+                State.postOrder.unshift(post.message_id);
+            } else {
+                // Если пользователь прокрутил вниз - добавляем в очередь
+                console.log('Queuing new post:', post.message_id);
+                State.newPosts.push(post);
+                UI.updateNewPostsBadge();
             }
             
-            if (window.scrollY < 200) {
-                this.flushNewPosts();
+            // Загружаем медиа, если есть
+            if (hasMedia && !data.media_url) {
+                this.handleMediaForMessage(post, data);
             }
         },
         
         handleMediaReady(data) {
+            console.log('Media ready for message:', data.message_id);
+            
             const post = State.posts.get(data.message_id);
             if (!post) return;
             
             if (data.media_url) {
                 post.media_url = data.media_url;
                 post.media_pending = false;
+                
+                // Обновляем пост в ленте
+                UI.updatePost(data.message_id, {
+                    media_url: data.media_url,
+                    media_type: post.media_type
+                });
+                
+                Toast.info('Медиа загружено');
             }
-            
-            UI.updatePost(data.message_id, {
-                media_url: data.media_url,
-                media_type: post.media_type
-            });
-            
-            Toast.info('Медиа загружено');
         },
         
         handleEditMessage(data) {
+            console.log('Edit message:', data.message_id);
+            
+            // Обновляем данные в State
             if (State.posts.has(data.message_id)) {
                 const post = State.posts.get(data.message_id);
                 if (data.text !== undefined) post.text = data.text;
@@ -1326,6 +1191,7 @@
                 State.posts.set(data.message_id, post);
             }
             
+            // Обновляем UI
             UI.updatePost(data.message_id, {
                 text: data.text,
                 edit_date: data.edit_date,
@@ -1337,17 +1203,38 @@
         },
         
         handleDeleteMessage(data) {
+            console.log('Delete message:', data.message_id);
+            
             State.posts.delete(data.message_id);
             const index = State.postOrder.indexOf(data.message_id);
             if (index !== -1) State.postOrder.splice(index, 1);
+            
             UI.deletePost(data.message_id);
             API.cancelMediaPoll(data.message_id);
+            
             Toast.warning('Сообщение удалено');
+        },
+        
+        handleMediaForMessage(post, data) {
+            // Запускаем опрос для получения медиа
+            API.pollMedia(data.message_id, (url, failed) => {
+                if (url) {
+                    post.media_url = url;
+                    post.media_pending = false;
+                    UI.updatePost(data.message_id, { media_url: url });
+                } else if (failed) {
+                    post.media_pending = false;
+                    UI.updatePostMediaUnavailable(data.message_id);
+                }
+            });
         },
         
         flushNewPosts() {
             if (State.newPosts.length === 0) return;
             
+            console.log(`Flushing ${State.newPosts.length} new posts`);
+            
+            // Добавляем все накопившиеся посты
             while (State.newPosts.length > 0) {
                 const post = State.newPosts.shift();
                 UI.addPostToTop(post);
@@ -1356,6 +1243,28 @@
             }
             
             UI.updateNewPostsBadge();
+            
+            // Показываем уведомление
+            Toast.success(`Загружено новых сообщений`);
+        },
+        
+        reconnect() {
+            if (State.wsReconnectAttempts >= CONFIG.MAX_RECONNECT_ATTEMPTS) {
+                console.log('Max reconnection attempts reached');
+                return;
+            }
+            
+            State.wsReconnectAttempts++;
+            const delay = Math.min(CONFIG.RECONNECT_BASE_DELAY * Math.pow(2, State.wsReconnectAttempts), 30000);
+            
+            console.log(`Reconnecting in ${delay}ms (attempt ${State.wsReconnectAttempts})`);
+            
+            setTimeout(() => {
+                if (!State.wsConnected) {
+                    console.log('Attempting to reconnect...');
+                    this.connect();
+                }
+            }, delay);
         }
     };
 
