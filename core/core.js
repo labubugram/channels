@@ -625,7 +625,7 @@
             } else if (post.has_media) {
                 mediaHTML = post.media_unavailable
                     ? '<div class="media-unavailable">Медиа недоступно</div>'
-                    : '<div class="media-loading"><img src="/channels/core/loader.svg" alt="Загрузка" class="media-loader"></div>';
+                    : '<div class="media-loading"><img src="loader.svg" alt="Загрузка" class="media-loader"></div>';
             }
             
             postEl.innerHTML = `
@@ -668,8 +668,9 @@
             const fullUrl = url.startsWith('http') ? url : `${CONFIG.API_BASE}${url}`;
             
             let isVideo = false;
+            let typeStr = '';
             if (type) {
-                const typeStr = String(type).toLowerCase();
+                typeStr = String(type).toLowerCase();
                 isVideo = typeStr.includes('video') || 
                          typeStr.includes('document') || 
                          typeStr.includes('animation') || 
@@ -683,18 +684,55 @@
             }
             
             if (isVideo) {
-                return `
-                    <div class="media-container">
-                        <video 
-                            src="${fullUrl}" 
-                            controls 
-                            preload="metadata" 
-                            playsinline
-                            style="max-width:100%; max-height:500px; background:#282c3000;">
-                            Ваш браузер не поддерживает видео.
-                        </video>
-                    </div>
-                `;
+                // Проверяем, является ли файл гифкой/анимацией
+                const isGifLike = 
+                    // По расширению
+                    fullUrl.match(/\.gif$/i) || 
+                    // По типу из Telegram
+                    (type && (
+                        typeStr.includes('gif') || 
+                        typeStr.includes('animation') ||
+                        // Для MP4 без звука в Telegram часто используется тип 'video' с пометкой
+                        (typeStr.includes('video') && typeStr.includes('noaudio'))
+                    )) ||
+                    // По URL (некоторые сервера помечают гифки)
+                    fullUrl.includes('/gif/') ||
+                    fullUrl.includes('_gif.') ||
+                    fullUrl.includes('.gif?') ||
+                    // Проверка на анимационные эмодзи/стикеры
+                    (type && typeStr.includes('sticker') && typeStr.includes('animated'));
+                
+                if (isGifLike) {
+                    // Для гифок: без контролов, автозапуск, зацикливание, без звука
+                    return `
+                        <div class="media-container">
+                            <video 
+                                src="${fullUrl}" 
+                                autoplay 
+                                loop 
+                                muted 
+                                playsinline
+                                preload="auto"
+                                style="max-width:100%; max-height:500px; background:#282c3000;">
+                                Ваш браузер не поддерживает видео.
+                            </video>
+                        </div>
+                    `;
+                } else {
+                    // Для обычных видео: с контролами
+                    return `
+                        <div class="media-container">
+                            <video 
+                                src="${fullUrl}" 
+                                controls 
+                                preload="metadata" 
+                                playsinline
+                                style="max-width:100%; max-height:500px; background:#282c3000;">
+                                Ваш браузер не поддерживает видео.
+                            </video>
+                        </div>
+                    `;
+                }
             } else {
                 return `
                     <div class="media-container">
@@ -1029,6 +1067,16 @@
                     UI.updateConnectionStatus(true);
                     Toast.success('Подключено к серверу');
                     
+                    // +++ ОТПРАВЛЯЕМ ПОДПИСКУ НА КАНАЛ +++
+                    if (CONFIG.CHANNEL_ID) {
+                        const subscribeMsg = {
+                            type: 'subscribe',
+                            channel_id: parseInt(CONFIG.CHANNEL_ID)
+                        };
+                        State.ws.send(JSON.stringify(subscribeMsg));
+                        console.log(`Subscribed to channel ${CONFIG.CHANNEL_ID}`);
+                    }
+                    
                     // Отправляем ping каждые 30 секунд
                     setInterval(() => {
                         if (State.ws && State.ws.readyState === WebSocket.OPEN) {
@@ -1064,11 +1112,15 @@
         
         async handleMessage(data) {
             // Игнорируем служебные сообщения
-            if (['ping', 'pong', 'welcome', 'heartbeat', 'buffering', 'flush_start', 'flush_complete'].includes(data.type)) {
+            if (['ping', 'pong', 'welcome', 'heartbeat', 'buffering', 'flush_start', 'flush_complete', 'subscribed', 'error'].includes(data.type)) {
+                // Для сообщения subscribed показываем успешную подписку
+                if (data.type === 'subscribed') {
+                    console.log(`Successfully subscribed to channel ${data.channel_id}`);
+                }
                 return;
             }
             
-            // Проверяем, относится ли сообщение к нашему каналу
+            // Проверяем, относится ли сообщение к нашему каналу (защита на клиенте)
             if (data.channel_id !== parseInt(CONFIG.CHANNEL_ID)) return;
             
             // Дедупликация сообщений
