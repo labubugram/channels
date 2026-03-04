@@ -342,7 +342,7 @@ body {
     display: flex;
     align-items: center;
     gap: 10px;
-    margin-bottom: 20px;
+    margin-bottom: 10px;
 }
 
 .post-avatar {
@@ -397,9 +397,9 @@ body {
 }
 
 .post-text {
-    font-size: 15px;
+    font-size: 14px;
     line-height: 1.4;
-    margin-bottom: 20px;
+    margin-bottom: 10px;
     white-space: normal;
     word-wrap: break-word;
     color: var(--text-primary);
@@ -418,7 +418,7 @@ body {
 .media-container {
     border-radius: var(--media-radius);
     overflow: hidden;
-    margin-bottom: 12px;
+    margin-bottom: 5px;
     background: var(--bg-secondary);
     position: relative;
     cursor: pointer;
