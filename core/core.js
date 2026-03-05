@@ -16,9 +16,9 @@
         LAZY_LOAD_OFFSET: 500,
         IMAGE_UNLOAD_DISTANCE: 2000,
         DEDUP_TTL: 1000,
-        SYNC_AFTER_RECONNECT_LIMIT: 50,      // Новое: лимит для синхронизации после реконнекта
-        MEDIA_RETRY_DELAY: 10000,             // Новое: задержка перед повторной проверкой медиа
-        RECONCILIATION_INTERVAL: 30000,       // Новое: интервал периодической сверки (30 сек)
+        SYNC_AFTER_RECONNECT_LIMIT: 50,
+        MEDIA_RETRY_DELAY: 10000,
+        RECONCILIATION_INTERVAL: 30000,
         WS_BASE: (() => {
             const apiBase = document.querySelector('meta[name="mirror:api-base"]')?.content || 'https://0808.us.nekhebet.su:8081';
             return apiBase.replace('http://', 'ws://').replace('https://', 'wss://');
@@ -29,7 +29,7 @@
         posts: new Map(),
         postOrder: [],
         newPosts: [],
-        offset: 0,
+        cursor: null,              // Курсор для пагинации (before_id)
         hasMore: true,
         isLoading: false,
         ws: null,
@@ -38,7 +38,7 @@
         mediaCache: new Map(),
         mediaErrorCache: new Set(),
         mediaPollingQueue: new Map(),
-        mediaRetryTimers: new Map(),          // Новое: таймеры для повторной проверки медиа
+        mediaRetryTimers: new Map(),
         scrollTimeout: null,
         recentMessages: new Map(),
         lastDocumentHeight: 0,
@@ -50,9 +50,9 @@
         wsProcessing: false,
         domCache: null,
         scrollPosition: 0,
-        lastKnownMessageId: null,              // Новое: ID последнего известного сообщения
-        reconciliationTimer: null,              // Новое: таймер периодической сверки
-        pendingHistoryMessages: []              // Новое: очередь для истории при reconnect
+        lastKnownMessageId: null,
+        reconciliationTimer: null,
+        pendingHistoryMessages: []
     };
 
     const Security = {
@@ -261,8 +261,54 @@
         };
     };
 
+    // ==================== ИСПРАВЛЕННЫЙ API С КУРСОРНОЙ ПАГИНАЦИЕЙ ====================
     const API = {
-        async fetchMessages(offset = 0, limit = CONFIG.INITIAL_LIMIT) {
+        // Основной метод с курсорной пагинацией
+        async fetchMessages(cursor = null, limit = CONFIG.INITIAL_LIMIT) {
+            try {
+                let url = `${CONFIG.API_BASE}/api/channel/posts?channel_id=${CONFIG.CHANNEL_ID}&limit=${limit}`;
+                
+                // Если есть курсор (before_id), добавляем его
+                if (cursor) {
+                    url += `&before_id=${cursor}`;
+                }
+                
+                const response = await fetch(url);
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                const data = await response.json();
+                
+                // Извлекаем посты из ответа
+                const posts = data.posts || [];
+                
+                // Определяем, есть ли ещё сообщения
+                const hasMore = data.pagination?.has_more || posts.length === limit;
+                
+                // Следующий курсор - ID самого старого сообщения в текущей партии
+                const nextCursor = posts.length > 0 ? posts[posts.length - 1].message_id : null;
+                
+                return {
+                    messages: posts,
+                    pagination: {
+                        has_more: hasMore,
+                        next_before_id: nextCursor,
+                        total: data.pagination?.total,
+                        limit: limit
+                    }
+                };
+            } catch (err) {
+                console.error('Error fetching messages:', err);
+                return { 
+                    messages: [], 
+                    pagination: { 
+                        has_more: false,
+                        next_before_id: null
+                    } 
+                };
+            }
+        },
+
+        // Метод для обратной совместимости (если сервер не поддерживает курсоры)
+        async fetchMessagesWithOffset(offset = 0, limit = CONFIG.INITIAL_LIMIT) {
             try {
                 const response = await fetch(`${CONFIG.API_BASE}/api/channel/posts?channel_id=${CONFIG.CHANNEL_ID}&offset=${offset}&limit=${limit}`);
                 if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -272,11 +318,12 @@
                     hasMore: (data.posts || []).length === limit
                 };
             } catch (err) {
+                console.error('Error fetching messages with offset:', err);
                 return { messages: [], hasMore: false };
             }
         },
-
-        // Новый метод: получить сообщения после определенного ID
+        
+        // Получить сообщения после определенного ID (для синхронизации)
         async fetchMessagesSince(afterId, limit = CONFIG.SYNC_AFTER_RECONNECT_LIMIT) {
             if (!afterId) return { messages: [] };
             
@@ -299,15 +346,15 @@
             }
         },
 
-        // Новый метод: получить одно сообщение по ID
+        // Получить одно сообщение по ID
         async fetchMessage(messageId) {
             try {
                 const response = await fetch(
-                    `${CONFIG.API_BASE}/api/channel/posts?channel_id=${CONFIG.CHANNEL_ID}&message_id=${messageId}`
+                    `${CONFIG.API_BASE}/api/channel/post/${messageId}?channel_id=${CONFIG.CHANNEL_ID}`
                 );
                 if (!response.ok) return null;
                 const data = await response.json();
-                return data.post?.[0] || null;
+                return data.post || null;
             } catch (err) {
                 console.error('Error fetching single message:', err);
                 return null;
@@ -348,7 +395,9 @@
                     }
                     return data;
                 }
-            } catch (err) {}
+            } catch (err) {
+                console.error('Error fetching media:', err);
+            }
             return null;
         },
         
@@ -393,7 +442,6 @@
             poll(1);
         },
 
-        // Новый метод: повторная проверка "зависшего" медиа
         retryMedia(messageId) {
             if (State.mediaRetryTimers.has(messageId)) {
                 clearTimeout(State.mediaRetryTimers.get(messageId));
@@ -613,7 +661,6 @@
                 });
             });
 
-            // Добавляем повторную проверку для "зависших" медиа
             API.retryMedia(messageId);
         },
         
@@ -694,27 +741,21 @@
             }
         },
 
-        // Новый метод: сортировка постов
         sortPosts() {
-            // Сортируем по убыванию ID (новые сверху)
             State.postOrder.sort((a, b) => b - a);
             
-            // Перерендериваем ленту
             const feed = document.getElementById('feed');
             const posts = Array.from(feed.children);
             
-            // Создаем Map для быстрого доступа к DOM элементам
             const postMap = new Map();
             posts.forEach(post => {
                 const id = Number(post.dataset.messageId);
                 if (id) postMap.set(id, post);
             });
 
-            // Переставляем элементы в правильном порядке
             State.postOrder.forEach((id, index) => {
                 const post = postMap.get(id);
                 if (post) {
-                    // Если элемент не на своем месте, перемещаем
                     if (feed.children[index] !== post) {
                         feed.insertBefore(post, feed.children[index]);
                     }
@@ -722,15 +763,12 @@
             });
         },
 
-        // Новый метод: полный рендер ленты из State
         renderFeed() {
             const feed = document.getElementById('feed');
             const fragment = document.createDocumentFragment();
             
-            // Сортируем посты
             this.sortPosts();
             
-            // Создаем элементы для всех постов в правильном порядке
             State.postOrder.forEach(messageId => {
                 const post = State.posts.get(messageId);
                 if (post) {
@@ -745,15 +783,12 @@
             feed.innerHTML = '';
             feed.appendChild(fragment);
             
-            // Добавляем класс visible для анимации
             feed.querySelectorAll('.post').forEach(post => {
                 requestAnimationFrame(() => post.classList.add('visible'));
             });
             
-            // Переинициализируем IntersectionObserver
             this.initIntersectionObserver();
             
-            // Загружаем медиа для видимых постов
             State.posts.forEach((post, messageId) => {
                 if (post.has_media && !post.media_url) {
                     this.loadPostMedia(messageId);
@@ -903,7 +938,6 @@
                 }
             });
             
-            // Сортируем и рендерим всю ленту
             this.renderFeed();
             
             posts.forEach(post => {
@@ -920,10 +954,8 @@
                 State.posts.set(post.message_id, post);
                 State.postOrder.unshift(post.message_id);
                 
-                // Создаем элемент
                 const postEl = this.createPostElement(post);
                 
-                // Вставляем в начало
                 if (feed.firstChild) {
                     feed.insertBefore(postEl, feed.firstChild);
                 } else {
@@ -948,7 +980,6 @@
             }
         },
         
-        // Новый метод: добавить несколько постов в начало (для истории)
         addPostsToTop(posts) {
             if (!posts || posts.length === 0) return;
             
@@ -967,14 +998,12 @@
             });
             
             if (newPosts.length > 0) {
-                // Вставляем все новые посты в начало
                 if (feed.firstChild) {
                     feed.insertBefore(fragment, feed.firstChild);
                 } else {
                     feed.appendChild(fragment);
                 }
                 
-                // Анимация
                 requestAnimationFrame(() => {
                     newPosts.forEach(post => {
                         const postEl = document.querySelector(`.post[data-message-id="${post.message_id}"]`);
@@ -988,7 +1017,6 @@
                     document.querySelectorAll('.post.new').forEach(el => el.classList.remove('new'));
                 }, 3000);
                 
-                // Обновляем IntersectionObserver
                 if (this.observer) {
                     newPosts.forEach(post => {
                         const postEl = document.querySelector(`.post[data-message-id="${post.message_id}"]`);
@@ -998,14 +1026,12 @@
                 
                 this.trimOldPosts();
                 
-                // Загружаем медиа
                 newPosts.forEach(post => {
                     if (post.has_media && !post.media_url) {
                         this.loadPostMedia(post.message_id);
                     }
                 });
                 
-                // Обновляем lastKnownMessageId
                 if (posts[0]?.message_id > (State.lastKnownMessageId || 0)) {
                     State.lastKnownMessageId = posts[0].message_id;
                 }
@@ -1152,6 +1178,7 @@
         }
     };
 
+    // ==================== ИСПРАВЛЕННЫЙ MessageLoader С КУРСОРНОЙ ПАГИНАЦИЕЙ ====================
     const MessageLoader = {
         async loadMessages(reset = false) {
             if (State.isLoading) return;
@@ -1162,7 +1189,7 @@
                 State.posts.clear();
                 State.postOrder = [];
                 document.getElementById('feed').innerHTML = '';
-                State.offset = 0;
+                State.cursor = null;
                 State.hasMore = true;
                 API.clearMediaCache();
                 State.lastKnownMessageId = null;
@@ -1177,18 +1204,23 @@
             UI.setLoaderVisible(true);
             
             try {
-                const data = await API.fetchMessages(State.offset, CONFIG.INITIAL_LIMIT);
+                // Используем курсорную пагинацию
+                const data = await API.fetchMessages(State.cursor, CONFIG.INITIAL_LIMIT);
                 
                 if (data.messages && data.messages.length > 0) {
-                    State.hasMore = data.hasMore !== false;
-                    State.offset += data.messages.length;
+                    // Сохраняем курсор для следующей загрузки
+                    State.cursor = data.pagination.next_before_id;
+                    State.hasMore = data.pagination.has_more;
                     
                     const newMessages = [];
                     data.messages.forEach(post => {
+                        // Проверяем, нет ли уже такого сообщения (дедупликация)
                         if (!State.posts.has(post.message_id)) {
                             State.posts.set(post.message_id, post);
                             State.postOrder.push(post.message_id);
                             newMessages.push(post);
+                        } else {
+                            console.log('Duplicate message skipped:', post.message_id);
                         }
                     });
                     
@@ -1196,11 +1228,15 @@
                         UI.renderPosts(newMessages);
                     }
                     
-                    // Обновляем lastKnownMessageId
-                    if (data.messages[0]?.message_id > (State.lastKnownMessageId || 0)) {
-                        State.lastKnownMessageId = data.messages[0].message_id;
+                    // Обновляем lastKnownMessageId (самое свежее сообщение)
+                    const newestMessage = data.messages.reduce((max, msg) => 
+                        msg.message_id > max ? msg.message_id : max, 0);
+                    
+                    if (newestMessage > (State.lastKnownMessageId || 0)) {
+                        State.lastKnownMessageId = newestMessage;
                     }
                     
+                    // Загружаем медиа для новых постов
                     data.messages.forEach(post => {
                         if (post.has_media) {
                             API.fetchMedia(post.message_id).then(mediaInfo => {
@@ -1235,8 +1271,10 @@
                     });
                 } else {
                     State.hasMore = false;
+                    document.getElementById('infiniteScrollTrigger').style.display = 'none';
                 }
             } catch (err) {
+                console.error('Error loading messages:', err);
             } finally {
                 State.isLoading = false;
                 UI.setLoaderVisible(false);
@@ -1248,11 +1286,9 @@
             await this.loadMessages(true);
             UI.initIntersectionObserver();
             
-            // Запускаем периодическую сверку
             this.startReconciliation();
         },
 
-        // Новый метод: синхронизация после реконнекта
         async syncAfterReconnect() {
             if (!State.lastKnownMessageId) return;
             
@@ -1262,7 +1298,6 @@
                 
                 if (data.messages && data.messages.length > 0) {
                     console.log(`Found ${data.messages.length} missed messages`);
-                    // Добавляем пропущенные сообщения в начало
                     UI.addPostsToTop(data.messages);
                     
                     Toast.info(`Загружено ${data.messages.length} пропущенных сообщений`);
@@ -1272,7 +1307,6 @@
             }
         },
 
-        // Новый метод: периодическая сверка с сервером
         startReconciliation() {
             if (State.reconciliationTimer) {
                 clearInterval(State.reconciliationTimer);
@@ -1281,7 +1315,6 @@
             State.reconciliationTimer = setInterval(async () => {
                 if (!State.wsConnected || !State.lastKnownMessageId) return;
                 
-                // Проверяем, есть ли новые сообщения
                 try {
                     const data = await API.fetchMessagesSince(State.lastKnownMessageId, 1);
                     if (data.messages && data.messages.length > 0) {
@@ -1294,13 +1327,11 @@
             }, CONFIG.RECONCILIATION_INTERVAL);
         },
 
-        // Новый метод: обработка истории при reconnect
         processHistory(messages) {
             if (!messages || messages.length === 0) return;
             
             console.log(`Processing ${messages.length} history messages`);
             
-            // Фильтруем только новые сообщения
             const newMessages = messages.filter(msg => !State.posts.has(msg.message_id));
             
             if (newMessages.length > 0) {
@@ -1345,7 +1376,6 @@
                     UI.updateConnectionStatus(true);
                     Toast.success('Подключено к серверу');
                     
-                    // Отправляем подписку на канал
                     if (CONFIG.CHANNEL_ID) {
                         const subscribeMsg = {
                             type: 'subscribe',
@@ -1355,12 +1385,10 @@
                         console.log(`Subscribed to channel ${CONFIG.CHANNEL_ID}`);
                     }
                     
-                    // Запускаем синхронизацию после подключения
                     setTimeout(() => {
                         MessageLoader.syncAfterReconnect();
                     }, 500);
                     
-                    // Отправляем ping каждые 30 секунд
                     setInterval(() => {
                         if (State.ws && State.ws.readyState === WebSocket.OPEN) {
                             State.ws.send(JSON.stringify({ type: 'ping' }));
@@ -1394,14 +1422,12 @@
         },
         
         async handleMessage(data) {
-            // Обработка истории при reconnect
             if (data.type === 'history') {
                 console.log('Received history batch:', data.messages?.length);
                 MessageLoader.processHistory(data.messages);
                 return;
             }
             
-            // Игнорируем служебные сообщения
             if (['ping', 'pong', 'welcome', 'heartbeat', 'buffering', 'flush_start', 'flush_complete', 'subscribed', 'error'].includes(data.type)) {
                 if (data.type === 'subscribed') {
                     console.log(`Successfully subscribed to channel ${data.channel_id}`);
@@ -1409,10 +1435,8 @@
                 return;
             }
             
-            // Проверяем, относится ли сообщение к нашему каналу
             if (data.channel_id !== parseInt(CONFIG.CHANNEL_ID)) return;
             
-            // Дедупликация сообщений
             const messageKey = `${data.channel_id}-${data.message_id}`;
             const lastReceived = State.recentMessages.get(messageKey);
             if (lastReceived && (Date.now() - lastReceived < CONFIG.DEDUP_TTL)) {
@@ -1422,7 +1446,6 @@
             
             State.recentMessages.set(messageKey, Date.now());
             
-            // Очистка старых записей
             if (State.recentMessages.size > 100) {
                 const now = Date.now();
                 for (const [key, time] of State.recentMessages.entries()) {
@@ -1451,7 +1474,6 @@
         },
         
         handleNewMessage(data) {
-            // Проверяем, нет ли уже такого сообщения
             if (State.posts.has(data.message_id)) {
                 console.log('Message already exists:', data.message_id);
                 return;
@@ -1475,12 +1497,10 @@
                 is_edited: false
             };
             
-            // Обновляем lastKnownMessageId
             if (data.message_id > (State.lastKnownMessageId || 0)) {
                 State.lastKnownMessageId = data.message_id;
             }
             
-            // Добавляем пост в начало ленты
             if (window.scrollY < 200) {
                 console.log('Adding new post immediately:', post.message_id);
                 UI.addPostToTop(post);
@@ -1490,7 +1510,6 @@
                 UI.updateNewPostsBadge();
             }
             
-            // Загружаем медиа, если есть
             if (hasMedia && !data.media_url) {
                 this.handleMediaForMessage(post, data);
             }
@@ -1518,7 +1537,6 @@
         handleEditMessage(data) {
             console.log('Edit message:', data.message_id);
             
-            // Если пост не существует, пробуем загрузить его
             if (!State.posts.has(data.message_id)) {
                 console.log('Editing unknown post, attempting to fetch...');
                 API.fetchMessage(data.message_id).then(post => {
@@ -1531,7 +1549,6 @@
                 return;
             }
             
-            // Обновляем данные в State
             if (State.posts.has(data.message_id)) {
                 const post = State.posts.get(data.message_id);
                 if (data.text !== undefined) post.text = data.text;
@@ -1545,7 +1562,6 @@
                 State.posts.set(data.message_id, post);
             }
             
-            // Обновляем UI
             UI.updatePost(data.message_id, {
                 text: data.text,
                 edit_date: data.edit_date,
@@ -1712,7 +1728,6 @@
             UI.cacheDOM();
         });
 
-        // Периодическая сортировка для гарантии порядка
         setInterval(() => {
             if (State.posts.size > 0) {
                 UI.sortPosts();
