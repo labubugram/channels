@@ -632,7 +632,7 @@
                 <div class="post-content">
                     <div class="post-header">
                         <div class="post-avatar">
-                            <img src="nekhebet.svg" style="width:36px; height:36px; object-fit:cover;" alt="Channel avatar" loading="lazy">
+                            <img src="avatar640.jpg" style="width:36px; height:36px; object-fit:cover;" alt="Channel avatar" loading="lazy">
                         </div>
                         <div class="post-author-info">
                             <div class="post-author-name">
