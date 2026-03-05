@@ -578,7 +578,7 @@
             document.getElementById('channelUsername').textContent = `@${CONFIG.CHANNEL_USERNAME}`;
             const avatarEl = document.getElementById('channelAvatar');
             if (avatarEl) {
-                avatarEl.innerHTML = `<img src="nekhebet.svg" style="width:54px; height:54px; object-fit:cover;" alt="Channel avatar" loading="lazy">`;
+                avatarEl.innerHTML = `<img src="avatar640.jpg" style="width:54px; height:54px; object-fit:cover;" alt="Channel avatar" loading="lazy">`;
             }
         },
         
