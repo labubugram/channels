@@ -14,7 +14,7 @@
         MAX_MEDIA_POLL_ATTEMPTS: 12,
         MAX_VISIBLE_POSTS: 100,
         LAZY_LOAD_OFFSET: 500,
-        IMAGE_UNLOAD_DISTANCE: 1000,
+        IMAGE_UNLOAD_DISTANCE: 2000,
         DEDUP_TTL: 1000,
         WS_BASE: (() => {
             const apiBase = document.querySelector('meta[name="mirror:api-base"]')?.content || 'https://0808.us.nekhebet.su:8081';
