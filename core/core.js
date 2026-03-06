@@ -24,7 +24,7 @@
         SYNC_AFTER_RECONNECT: true,
         PING_INTERVAL: 30000,
         MAX_PLACEHOLDER_RETRIES: 3,
-        API_VERSION: 'v2'  // Версия API для полных данных
+        API_VERSION: 'v1'  // Версия API для полных данных
     };
 
     const State = {
