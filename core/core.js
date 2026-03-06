@@ -14,12 +14,14 @@
         MAX_MEDIA_POLL_ATTEMPTS: 12,
         MAX_VISIBLE_POSTS: 100,
         LAZY_LOAD_OFFSET: 500,
-        IMAGE_UNLOAD_DISTANCE: 2000,
+        IMAGE_UNLOAD_DISTANCE: 5000, // Увеличено с 2000 до 5000px
         DEDUP_TTL: 1000,
         WS_BASE: (() => {
             const apiBase = document.querySelector('meta[name="mirror:api-base"]')?.content || 'https://0808.us.nekhebet.su:8081';
             return apiBase.replace('http://', 'ws://').replace('https://', 'wss://');
-        })()
+        })(),
+        MEDIA_RETRY_DELAY: 10000, // 10 секунд до повторной попытки загрузки медиа
+        SYNC_AFTER_RECONNECT: true // Синхронизировать после переподключения
     };
 
     const State = {
@@ -35,6 +37,7 @@
         mediaCache: new Map(),
         mediaErrorCache: new Set(),
         mediaPollingQueue: new Map(),
+        pendingMedia: new Map(), // Медиа, которые пришли, когда пост был скрыт
         scrollTimeout: null,
         recentMessages: new Map(),
         lastDocumentHeight: 0,
@@ -45,7 +48,8 @@
         wsMessageQueue: [],
         wsProcessing: false,
         domCache: null,
-        scrollPosition: 0
+        scrollPosition: 0,
+        mediaRetryTimeouts: new Map() // Таймеры для повторных попыток загрузки медиа
     };
 
     const Security = {
@@ -107,9 +111,19 @@
             if (!text) return '';
             let escaped = Security.escapeHtml(text);
             
-            escaped = escaped.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (match, linkText, url) => {
+            // ИСПРАВЛЕНО: Более надежное регулярное выражение для ссылок с обработкой скобок
+            escaped = escaped.replace(/\[([^\]]+)\]\(([^)]+?)(?:\s+"[^"]*")?\)/g, (match, linkText, url) => {
+                // Очищаем URL от потенциально опасных символов
+                url = url.replace(/[<>"']/g, '');
                 const safeUrl = Security.sanitizeUrl(url);
                 if (safeUrl === '#') return match;
+                
+                // Обрабатываем @упоминания в тексте ссылки
+                let displayText = linkText;
+                if (linkText.startsWith('@')) {
+                    displayText = `<span class="tg-mention">${linkText}</span>`;
+                }
+                
                 let domain = '';
                 try {
                     const urlObj = new URL(url);
@@ -117,7 +131,7 @@
                 } catch {
                     domain = url;
                 }
-                return `<a href="${safeUrl}" target="_blank" rel="noopener noreferrer nofollow" class="tg-link" title="${url}" data-domain="${domain}">${linkText}</a>`;
+                return `<a href="${safeUrl}" target="_blank" rel="noopener noreferrer nofollow" class="tg-link" title="${url}" data-domain="${domain}">${displayText}</a>`;
             });
 
             if (entities && entities.length > 0) {
@@ -189,6 +203,7 @@
                 }
             }
 
+            // Улучшенная обработка URL
             escaped = escaped.replace(/(?<!href="|">)(https?:\/\/[^\s<"')]+)(?![^<]*>)/g, (url) => {
                 const safeUrl = Security.sanitizeUrl(url);
                 if (safeUrl === '#') return url;
@@ -206,13 +221,18 @@
                 return `<a href="${safeUrl}" target="_blank" rel="noopener noreferrer nofollow" class="tg-link" data-domain="${displayDomain}" title="${url}">${displayText}</a>`;
             });
 
+            // Улучшенная обработка цитат
             escaped = escaped.replace(/^&gt;&gt;&gt; (.*)$/gm, '<blockquote class="tg-quote level-3">$1</blockquote>');
             escaped = escaped.replace(/^&gt;&gt; (.*)$/gm, '<blockquote class="tg-quote level-2">$1</blockquote>');
             escaped = escaped.replace(/^&gt; (.*)$/gm, '<blockquote class="tg-quote level-1">$1</blockquote>');
 
-            escaped = escaped.replace(/(?<!>|href=")@(\w+)(?!<)/g, '<span class="tg-mention" data-mention="@$1" title="@$1 в Telegram">@$1</span>');
-            escaped = escaped.replace(/(?<!>|href=")#(\w+)(?!<)/g, '<span class="tg-hashtag" data-hashtag="#$1">#$1</span>');
+            // Улучшенная обработка @упоминаний (не внутри ссылок)
+            escaped = escaped.replace(/(?<!>|href="|">)@(\w+)(?!<)/g, '<span class="tg-mention" data-mention="@$1" title="@$1 в Telegram">@$1</span>');
+            
+            // Улучшенная обработка хэштегов (не внутри ссылок)
+            escaped = escaped.replace(/(?<!>|href="|">)#(\w+)(?!<)/g, '<span class="tg-hashtag" data-hashtag="#$1">#$1</span>');
 
+            // Обработка переносов строк
             const lines = escaped.split('\n');
             for (let i = 0; i < lines.length; i++) {
                 if (i < lines.length - 1 && !lines[i].match(/<[^>]+>$/)) {
@@ -266,6 +286,22 @@
                 };
             } catch (err) {
                 return { messages: [], hasMore: false };
+            }
+        },
+        
+        // НОВЫЙ МЕТОД: Получение сообщений после определенного ID
+        async fetchMessagesSince(afterId, limit = 50) {
+            try {
+                const response = await fetch(`${CONFIG.API_BASE}/api/channel/posts/since?channel_id=${CONFIG.CHANNEL_ID}&after_id=${afterId}&limit=${limit}`);
+                if (!response.ok) {
+                    if (response.status === 404) return { posts: [] };
+                    throw new Error(`HTTP ${response.status}`);
+                }
+                const data = await response.json();
+                return data;
+            } catch (err) {
+                console.error('Error fetching messages since:', err);
+                return { posts: [] };
             }
         },
         
@@ -354,6 +390,12 @@
                 if (timeoutId) clearTimeout(timeoutId);
                 State.mediaPollingQueue.delete(messageId);
             }
+            
+            // Отменяем также retry timeout
+            if (State.mediaRetryTimeouts.has(messageId)) {
+                clearTimeout(State.mediaRetryTimeouts.get(messageId));
+                State.mediaRetryTimeouts.delete(messageId);
+            }
         },
         
         cancelAllMediaPoll() {
@@ -361,11 +403,17 @@
                 if (data.timeoutId) clearTimeout(data.timeoutId);
                 State.mediaPollingQueue.delete(messageId);
             });
+            
+            State.mediaRetryTimeouts.forEach((timeoutId, messageId) => {
+                clearTimeout(timeoutId);
+                State.mediaRetryTimeouts.delete(messageId);
+            });
         },
         
         clearMediaCache() {
             State.mediaCache.clear();
             State.mediaErrorCache.clear();
+            State.pendingMedia.clear();
             this.cancelAllMediaPoll();
         }
     };
@@ -459,6 +507,8 @@
                     if (entry.isIntersecting) {
                         State.visiblePosts.add(msgId);
                         this.loadPostMedia(msgId);
+                        // Восстанавливаем медиа, если было выгружено
+                        this.restorePostMediaIfNeeded(msgId);
                     } else {
                         State.visiblePosts.delete(msgId);
                         this.unloadPostMedia(msgId);
@@ -506,9 +556,109 @@
             return true;
         },
         
+        // ИСПРАВЛЕНО: Безопасная выгрузка медиа без полного удаления
+        unloadPostMedia(messageId) {
+            if (!CONFIG.IMAGE_UNLOAD_DISTANCE) return;
+            const postEl = document.querySelector(`.post[data-message-id="${messageId}"]`);
+            if (!postEl) return;
+            
+            const rect = postEl.getBoundingClientRect();
+            const viewportHeight = window.innerHeight;
+            const distanceFromViewport = Math.min(
+                Math.abs(rect.top - viewportHeight),
+                Math.abs(rect.bottom)
+            );
+            
+            // Только если действительно далеко за пределами viewport
+            if (distanceFromViewport > CONFIG.IMAGE_UNLOAD_DISTANCE) {
+                const mediaContainer = postEl.querySelector('.media-container');
+                if (mediaContainer && !mediaContainer.classList.contains('media-unloaded')) {
+                    const video = mediaContainer.querySelector('video');
+                    if (video) {
+                        // Сохраняем src в data-атрибут перед очисткой
+                        video.dataset.src = video.src;
+                        video.pause();
+                        video.removeAttribute('src');
+                        video.load();
+                        mediaContainer.classList.add('media-unloaded');
+                        
+                        // Добавляем плейсхолдер
+                        const placeholder = document.createElement('div');
+                        placeholder.className = 'media-placeholder';
+                        placeholder.textContent = '📹';
+                        mediaContainer.appendChild(placeholder);
+                        return;
+                    }
+                    
+                    const img = mediaContainer.querySelector('img');
+                    if (img) {
+                        img.dataset.src = img.src;
+                        img.style.display = 'none';
+                        mediaContainer.classList.add('media-unloaded');
+                        
+                        // Добавляем плейсхолдер
+                        const placeholder = document.createElement('div');
+                        placeholder.className = 'media-placeholder';
+                        placeholder.textContent = '📷';
+                        mediaContainer.appendChild(placeholder);
+                    }
+                }
+            }
+        },
+        
+        // НОВЫЙ МЕТОД: Восстановление выгруженного медиа
+        restorePostMediaIfNeeded(messageId) {
+            const postEl = document.querySelector(`.post[data-message-id="${messageId}"]`);
+            if (!postEl) return;
+            
+            const mediaContainer = postEl.querySelector('.media-container');
+            if (mediaContainer && mediaContainer.classList.contains('media-unloaded')) {
+                const post = State.posts.get(messageId);
+                if (post && post.media_url) {
+                    // Удаляем плейсхолдер
+                    const placeholder = mediaContainer.querySelector('.media-placeholder');
+                    if (placeholder) placeholder.remove();
+                    
+                    // Восстанавливаем медиа
+                    const newMedia = this.renderMedia(post.media_url, post.media_type);
+                    mediaContainer.outerHTML = newMedia;
+                    
+                    // Автозапуск для видео
+                    const newVideo = postEl.querySelector('video');
+                    if (newVideo && this.isElementInViewport(newVideo)) {
+                        newVideo.play().catch(() => {});
+                    }
+                }
+            }
+        },
+        
+        // Вспомогательный метод для проверки видимости
+        isElementInViewport(el) {
+            const rect = el.getBoundingClientRect();
+            return (
+                rect.top >= 0 &&
+                rect.left >= 0 &&
+                rect.bottom <= (window.innerHeight || document.documentElement.clientHeight) &&
+                rect.right <= (window.innerWidth || document.documentElement.clientWidth)
+            );
+        },
+        
         loadPostMedia(messageId) {
             const post = State.posts.get(messageId);
             if (!post || !post.has_media || post.media_url) return;
+            
+            // Проверяем, нет ли ожидающего медиа
+            const pendingMedia = State.pendingMedia.get(messageId);
+            if (pendingMedia) {
+                post.media_url = pendingMedia.media_url;
+                post.media_type = pendingMedia.media_type;
+                this.updatePost(messageId, {
+                    media_url: pendingMedia.media_url,
+                    media_type: pendingMedia.media_type
+                });
+                State.pendingMedia.delete(messageId);
+                return;
+            }
             
             API.fetchMedia(messageId).then(mediaInfo => {
                 if (mediaInfo && mediaInfo.url) {
@@ -528,36 +678,23 @@
                         this.updatePostMediaUnavailable(messageId);
                     }
                 });
-            });
-        },
-        
-        unloadPostMedia(messageId) {
-            if (!CONFIG.IMAGE_UNLOAD_DISTANCE) return;
-            const postEl = document.querySelector(`.post[data-message-id="${messageId}"]`);
-            if (!postEl) return;
-            
-            const rect = postEl.getBoundingClientRect();
-            const viewportHeight = window.innerHeight;
-            
-            if (rect.top > viewportHeight + CONFIG.IMAGE_UNLOAD_DISTANCE || rect.bottom < -CONFIG.IMAGE_UNLOAD_DISTANCE) {
-                const mediaContainer = postEl.querySelector('.media-container');
-                if (mediaContainer) {
-                    const img = mediaContainer.querySelector('img');
-                    if (img) {
-                        const currentSrc = img.src;
-                        img.dataset.src = currentSrc;
-                        img.src = '';
-                        img.srcset = '';
-                        mediaContainer.innerHTML = '<div class="media-placeholder">📷</div>';
-                    }
-                    const video = mediaContainer.querySelector('video');
-                    if (video) {
-                        video.pause();
-                        video.src = '';
-                        video.load();
-                    }
+                
+                // Добавляем повторную попытку через 10 секунд
+                if (!State.mediaRetryTimeouts.has(messageId)) {
+                    const timeoutId = setTimeout(() => {
+                        if (!post.media_url) {
+                            API.fetchMedia(messageId).then(mediaInfo => {
+                                if (mediaInfo && mediaInfo.url) {
+                                    post.media_url = mediaInfo.url;
+                                    this.updatePost(messageId, { media_url: mediaInfo.url });
+                                }
+                            });
+                        }
+                        State.mediaRetryTimeouts.delete(messageId);
+                    }, CONFIG.MEDIA_RETRY_DELAY);
+                    State.mediaRetryTimeouts.set(messageId, timeoutId);
                 }
-            }
+            });
         },
         
         trimOldPosts() {
@@ -619,8 +756,15 @@
             const views = Formatters.formatViews(post.views);
             const text = Formatters.formatText(post.text);
             
+            // Проверяем, нет ли ожидающего медиа для этого поста
+            const pendingMedia = State.pendingMedia.get(post.message_id);
             let mediaHTML = '';
-            if (post.media_url) {
+            if (pendingMedia) {
+                mediaHTML = this.renderMedia(pendingMedia.media_url, pendingMedia.media_type);
+                post.media_url = pendingMedia.media_url;
+                post.media_type = pendingMedia.media_type;
+                State.pendingMedia.delete(post.message_id);
+            } else if (post.media_url) {
                 mediaHTML = this.renderMedia(post.media_url, post.media_type);
             } else if (post.has_media) {
                 mediaHTML = post.media_unavailable
@@ -663,6 +807,7 @@
             return postEl;
         },
         
+        // ИСПРАВЛЕНО: Улучшенная обработка видео и изображений
         renderMedia(url, type) {
             if (!url) return '';
             const fullUrl = url.startsWith('http') ? url : `${CONFIG.API_BASE}${url}`;
@@ -686,24 +831,16 @@
             if (isVideo) {
                 // Проверяем, является ли файл гифкой/анимацией
                 const isGifLike = 
-                    // По расширению
                     fullUrl.match(/\.gif$/i) || 
-                    // По типу из Telegram
                     (type && (
                         typeStr.includes('gif') || 
-                        typeStr.includes('animation') ||
-                        // Для MP4 без звука в Telegram часто используется тип 'video' с пометкой
-                        (typeStr.includes('video') && typeStr.includes('noaudio'))
+                        typeStr.includes('animation')
                     )) ||
-                    // По URL (некоторые сервера помечают гифки)
                     fullUrl.includes('/gif/') ||
                     fullUrl.includes('_gif.') ||
-                    fullUrl.includes('.gif?') ||
-                    // Проверка на анимационные эмодзи/стикеры
-                    (type && typeStr.includes('sticker') && typeStr.includes('animated'));
+                    fullUrl.includes('.gif?');
                 
                 if (isGifLike) {
-                    // Для гифок: без контролов, автозапуск, зацикливание, без звука
                     return `
                         <div class="media-container">
                             <video 
@@ -719,7 +856,6 @@
                         </div>
                     `;
                 } else {
-                    // Для обычных видео: с контролами
                     return `
                         <div class="media-container">
                             <video 
@@ -807,7 +943,16 @@
         
         updatePost(messageId, data) {
             const postEl = document.querySelector(`.post[data-message-id="${messageId}"]`);
-            if (!postEl) return false;
+            if (!postEl) {
+                // Если поста нет в DOM, но пришло медиа - сохраняем в pending
+                if (data.media_url) {
+                    State.pendingMedia.set(messageId, {
+                        media_url: data.media_url,
+                        media_type: data.media_type
+                    });
+                }
+                return false;
+            }
             
             let changed = false;
             
@@ -836,6 +981,24 @@
                     const newMedia = this.renderMedia(data.media_url, data.media_type);
                     if (newMedia) {
                         mediaContainer.outerHTML = newMedia;
+                        
+                        const newMediaContainer = postEl.querySelector('.media-container');
+                        if (newMediaContainer) {
+                            newMediaContainer.addEventListener('click', () => {
+                                Lightbox.open(data.media_url, data.media_type);
+                            });
+                        }
+                        
+                        postEl.dataset.mediaUrl = data.media_url;
+                        postEl.dataset.mediaType = data.media_type || '';
+                        changed = true;
+                    }
+                } else {
+                    // Медиаконтейнера нет - добавляем
+                    const postContent = postEl.querySelector('.post-content');
+                    if (postContent) {
+                        const newMedia = this.renderMedia(data.media_url, data.media_type);
+                        postContent.insertAdjacentHTML('beforeend', newMedia);
                         
                         const newMediaContainer = postEl.querySelector('.media-container');
                         if (newMediaContainer) {
@@ -890,6 +1053,7 @@
                 const index = State.postOrder.indexOf(Number(messageId));
                 if (index !== -1) State.postOrder.splice(index, 1);
                 API.cancelMediaPoll(messageId);
+                State.pendingMedia.delete(messageId);
             }, 300);
             
             return true;
@@ -949,6 +1113,7 @@
                 UI.cleanup();
                 State.posts.clear();
                 State.postOrder = [];
+                State.pendingMedia.clear();
                 document.getElementById('feed').innerHTML = '';
                 State.offset = 0;
                 State.hasMore = true;
@@ -978,6 +1143,9 @@
                             newMessages.push(post);
                         }
                     });
+                    
+                    // Сортируем посты по дате (новые сверху)
+                    State.postOrder.sort((a, b) => b - a);
                     
                     if (newMessages.length > 0) {
                         UI.renderPosts(newMessages);
@@ -1067,7 +1235,6 @@
                     UI.updateConnectionStatus(true);
                     Toast.success('Подключено к серверу');
                     
-                    // +++ ОТПРАВЛЯЕМ ПОДПИСКУ НА КАНАЛ +++
                     if (CONFIG.CHANNEL_ID) {
                         const subscribeMsg = {
                             type: 'subscribe',
@@ -1075,6 +1242,11 @@
                         };
                         State.ws.send(JSON.stringify(subscribeMsg));
                         console.log(`Subscribed to channel ${CONFIG.CHANNEL_ID}`);
+                    }
+                    
+                    // Синхронизация после подключения
+                    if (CONFIG.SYNC_AFTER_RECONNECT && State.postOrder.length > 0) {
+                        this.syncAfterReconnect();
                     }
                     
                     // Отправляем ping каждые 30 секунд
@@ -1110,20 +1282,42 @@
             }
         },
         
-        async handleMessage(data) {
-            // Игнорируем служебные сообщения
+        // НОВЫЙ МЕТОД: Синхронизация после переподключения
+        async syncAfterReconnect() {
+            const lastPostId = State.postOrder[0];
+            if (!lastPostId) return;
+            
+            try {
+                const data = await API.fetchMessagesSince(lastPostId, 50);
+                if (data.posts && data.posts.length > 0) {
+                    // Добавляем пропущенные посты в начало ленты
+                    data.posts.reverse().forEach(post => {
+                        if (!State.posts.has(post.message_id)) {
+                            UI.addPostToTop(post);
+                            State.posts.set(post.message_id, post);
+                            State.postOrder.unshift(post.message_id);
+                        }
+                    });
+                    Toast.info(`Загружено ${data.posts.length} пропущенных сообщений`);
+                }
+            } catch (err) {
+                console.error('Sync after reconnect failed:', err);
+            }
+        },
+        
+        handleMessage(data) {
             if (['ping', 'pong', 'welcome', 'heartbeat', 'buffering', 'flush_start', 'flush_complete', 'subscribed', 'error'].includes(data.type)) {
-                // Для сообщения subscribed показываем успешную подписку
                 if (data.type === 'subscribed') {
                     console.log(`Successfully subscribed to channel ${data.channel_id}`);
+                }
+                if (data.type === 'welcome') {
+                    console.log('Received welcome from server');
                 }
                 return;
             }
             
-            // Проверяем, относится ли сообщение к нашему каналу (защита на клиенте)
             if (data.channel_id !== parseInt(CONFIG.CHANNEL_ID)) return;
             
-            // Дедупликация сообщений
             const messageKey = `${data.channel_id}-${data.message_id}`;
             const lastReceived = State.recentMessages.get(messageKey);
             if (lastReceived && (Date.now() - lastReceived < CONFIG.DEDUP_TTL)) {
@@ -1133,7 +1327,6 @@
             
             State.recentMessages.set(messageKey, Date.now());
             
-            // Очистка старых записей
             if (State.recentMessages.size > 100) {
                 const now = Date.now();
                 for (const [key, time] of State.recentMessages.entries()) {
@@ -1156,13 +1349,28 @@
                 case 'media_ready':
                     this.handleMediaReady(data);
                     break;
+                case 'history':
+                    this.handleHistory(data);
+                    break;
                 default:
                     console.log('Unknown message type:', data.type);
             }
         },
         
-        handleNewMessage(data) {
-            // Проверяем, нет ли уже такого сообщения
+        // НОВЫЙ МЕТОД: Обработка исторических сообщений при reconnect
+        handleHistory(data) {
+            if (data.messages && Array.isArray(data.messages)) {
+                console.log(`Received ${data.messages.length} historical messages`);
+                
+                data.messages.forEach(msg => {
+                    if (!State.posts.has(msg.message_id)) {
+                        this.handleNewMessage(msg, true); // true = историческое, не показывать уведомление
+                    }
+                });
+            }
+        },
+        
+        handleNewMessage(data, isHistorical = false) {
             if (State.posts.has(data.message_id)) {
                 console.log('Message already exists:', data.message_id);
                 return;
@@ -1186,21 +1394,17 @@
                 is_edited: false
             };
             
-            // ВАЖНО: Добавляем пост в начало ленты СРАЗУ
             if (window.scrollY < 200) {
-                // Если пользователь вверху страницы - показываем сразу
                 console.log('Adding new post immediately:', post.message_id);
                 UI.addPostToTop(post);
                 State.posts.set(post.message_id, post);
                 State.postOrder.unshift(post.message_id);
             } else {
-                // Если пользователь прокрутил вниз - добавляем в очередь
                 console.log('Queuing new post:', post.message_id);
                 State.newPosts.push(post);
                 UI.updateNewPostsBadge();
             }
             
-            // Загружаем медиа, если есть
             if (hasMedia && !data.media_url) {
                 this.handleMediaForMessage(post, data);
             }
@@ -1210,26 +1414,29 @@
             console.log('Media ready for message:', data.message_id);
             
             const post = State.posts.get(data.message_id);
-            if (!post) return;
             
-            if (data.media_url) {
-                post.media_url = data.media_url;
-                post.media_pending = false;
-                
-                // Обновляем пост в ленте
-                UI.updatePost(data.message_id, {
+            if (post) {
+                if (data.media_url) {
+                    post.media_url = data.media_url;
+                    post.media_pending = false;
+                    
+                    UI.updatePost(data.message_id, {
+                        media_url: data.media_url,
+                        media_type: post.media_type
+                    });
+                }
+            } else {
+                // Сохраняем для будущего рендера
+                State.pendingMedia.set(data.message_id, {
                     media_url: data.media_url,
-                    media_type: post.media_type
+                    media_type: data.media_type
                 });
-                
-                Toast.info('Медиа загружено');
             }
         },
         
         handleEditMessage(data) {
             console.log('Edit message:', data.message_id);
             
-            // Обновляем данные в State
             if (State.posts.has(data.message_id)) {
                 const post = State.posts.get(data.message_id);
                 if (data.text !== undefined) post.text = data.text;
@@ -1241,17 +1448,16 @@
                 post.is_edited = true;
                 post.edit_date = data.edit_date;
                 State.posts.set(data.message_id, post);
+                
+                UI.updatePost(data.message_id, {
+                    text: data.text,
+                    edit_date: data.edit_date,
+                    media_url: data.media_url,
+                    media_type: data.media_type
+                });
+            } else {
+                console.log('Edit for unknown post, ignoring:', data.message_id);
             }
-            
-            // Обновляем UI
-            UI.updatePost(data.message_id, {
-                text: data.text,
-                edit_date: data.edit_date,
-                media_url: data.media_url,
-                media_type: data.media_type
-            });
-            
-            Toast.info('Сообщение обновлено');
         },
         
         handleDeleteMessage(data) {
@@ -1263,12 +1469,10 @@
             
             UI.deletePost(data.message_id);
             API.cancelMediaPoll(data.message_id);
-            
-            Toast.warning('Сообщение удалено');
+            State.pendingMedia.delete(data.message_id);
         },
         
         handleMediaForMessage(post, data) {
-            // Запускаем опрос для получения медиа
             API.pollMedia(data.message_id, (url, failed) => {
                 if (url) {
                     post.media_url = url;
@@ -1286,7 +1490,6 @@
             
             console.log(`Flushing ${State.newPosts.length} new posts`);
             
-            // Добавляем все накопившиеся посты
             while (State.newPosts.length > 0) {
                 const post = State.newPosts.shift();
                 UI.addPostToTop(post);
@@ -1295,8 +1498,6 @@
             }
             
             UI.updateNewPostsBadge();
-            
-            // Показываем уведомление
             Toast.success(`Загружено новых сообщений`);
         },
         
