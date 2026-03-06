@@ -23,25 +23,26 @@
         MEDIA_RETRY_DELAY: 10000,
         SYNC_AFTER_RECONNECT: true,
         PING_INTERVAL: 30000,
-        MAX_PLACEHOLDER_RETRIES: 3
+        MAX_PLACEHOLDER_RETRIES: 3,
+        API_VERSION: 'v1'  // Версия API для полных данных
     };
 
     const State = {
-        posts: new Map(),
-        postOrder: [],
-        newPosts: [],
+        posts: new Map(),           // Map<message_id, post>
+        postOrder: [],              // Сортированные ID постов
+        newPosts: [],               // Очередь новых постов
         offset: 0,
         hasMore: true,
         isLoading: false,
         ws: null,
         wsConnected: false,
         wsReconnectAttempts: 0,
-        mediaCache: new Map(),
-        mediaErrorCache: new Set(),
-        mediaPollingQueue: new Map(),
-        pendingMedia: new Map(),
+        mediaCache: new Map(),       // Кэш медиа-информации
+        mediaErrorCache: new Set(),  // Ошибки загрузки медиа
+        mediaPollingQueue: new Map(),// Очередь опроса медиа
+        pendingMedia: new Map(),     // Ожидающие медиа
         scrollTimeout: null,
-        recentMessages: new Map(),
+        recentMessages: new Map(),   // Дедупликация сообщений
         lastDocumentHeight: 0,
         theme: localStorage.getItem('theme') || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'),
         visiblePosts: new Set(),
@@ -50,23 +51,23 @@
         domCache: null,
         scrollPosition: 0,
         mediaRetryTimeouts: new Map(),
-        intervals: [],      // Для очистки setInterval
-        timeouts: [],       // Для очистки setTimeout
+        intervals: [],               // Для очистки setInterval
+        timeouts: [],                // Для очистки setTimeout
         resizeObserver: null,
-        wsPingInterval: null
+        wsPingInterval: null,
+        // НОВОЕ: Кэш полных сообщений
+        fullMessageCache: new Map(),  // Map<message_id, full_message>
+        loadingMessages: new Set()    // ID сообщений в процессе загрузки
     };
 
     // ==================== ОЧИСТКА РЕСУРСОВ ====================
     function cleanupResources() {
-        // Очищаем все интервалы
         State.intervals.forEach(clearInterval);
         State.intervals = [];
         
-        // Очищаем все таймауты
         State.timeouts.forEach(clearTimeout);
         State.timeouts = [];
         
-        // Очищаем специфичные таймауты
         State.mediaRetryTimeouts.forEach((timeoutId, messageId) => {
             clearTimeout(timeoutId);
         });
@@ -77,20 +78,17 @@
         });
         State.mediaPollingQueue.clear();
         
-        // Очищаем ResizeObserver
         if (State.resizeObserver) {
             State.resizeObserver.disconnect();
             State.resizeObserver = null;
         }
         
-        // Очищаем WebSocket ping interval
         if (State.wsPingInterval) {
             clearInterval(State.wsPingInterval);
             State.wsPingInterval = null;
         }
     }
 
-    // Обертка для безопасного добавления таймаутов
     function safeSetTimeout(fn, delay) {
         const id = setTimeout(() => {
             const index = State.timeouts.indexOf(id);
@@ -135,7 +133,7 @@
         }
     };
 
-    // ==================== ПЕРЕПИСАННЫЙ ФОРМАТТЕР ====================
+    // ==================== ФОРМАТТЕР ====================
     const Formatters = {
         formatDate(date) {
             const d = new Date(date);
@@ -165,14 +163,12 @@
             return views.toString();
         },
         
-        // ПЕРЕПИСАНО: Безопасное форматирование текста
         formatText(text, entities = []) {
             if (!text) return '';
             
-            // Экранируем HTML
             let escaped = Security.escapeHtml(text);
             
-            // 1. Сначала обрабатываем Markdown-подобные ссылки [text](url)
+            // 1. Markdown-ссылки [text](url)
             escaped = escaped.replace(/\[([^\]]+)\]\(([^)]+?)(?:\s+"[^"]*")?\)/g, (match, linkText, url) => {
                 url = url.replace(/[<>"']/g, '');
                 const safeUrl = Security.sanitizeUrl(url);
@@ -186,21 +182,18 @@
                     domain = url;
                 }
                 
-                // Экранируем текст ссылки
                 const escapedLinkText = Security.escapeHtml(linkText);
                 return `<a href="${safeUrl}" target="_blank" rel="noopener noreferrer nofollow" class="tg-link" title="${url}" data-domain="${domain}">${escapedLinkText}</a>`;
             });
 
-            // 2. Обрабатываем entities из Telegram (если есть)
+            // 2. Обрабатываем entities из Telegram
             if (entities && entities.length > 0) {
-                // Сортируем от конца к началу, чтобы не ломать индексы
                 const sortedEntities = [...entities].sort((a, b) => b.offset - a.offset);
                 
                 for (const entity of sortedEntities) {
                     const { offset, length, type } = entity;
                     if (offset < 0 || offset + length > escaped.length) continue;
                     
-                    // Извлекаем контент, который нужно обернуть
                     const before = escaped.substring(0, offset);
                     const content = escaped.substring(offset, offset + length);
                     const after = escaped.substring(offset + length);
@@ -251,12 +244,10 @@
                     escaped = before + wrapped + after;
                 }
             } else {
-                // 3. Обрабатываем простые Markdown (если нет entities)
-                // Блоки кода
+                // 3. Простые Markdown
                 escaped = escaped.replace(/```([\s\S]*?)```/g, '<pre class="tg-code-block"><code>$1</code></pre>');
                 escaped = escaped.replace(/`([^`]+)`/g, '<code class="tg-inline-code">$1</code>');
                 
-                // Форматирование текста
                 const formatters = [
                     { pattern: /\*\*\*(.*?)\*\*\*/g, replacement: '<b><i>$1</i></b>' },
                     { pattern: /\*\*(.*?)\*\*/g, replacement: '<b>$1</b>' },
@@ -272,13 +263,11 @@
                 }
             }
 
-            // 4. Обрабатываем URL (но не внутри уже созданных ссылок)
-            // Используем временный маркер для защиты уже обработанных ссылок
+            // 4. URL
             const LINK_MARKER = '%%%LINK%%%';
             let parts = [];
             let lastIndex = 0;
             
-            // Находим все уже созданные ссылки и заменяем их на маркеры
             const linkRegex = /<a[^>]*>.*?<\/a>/g;
             let match;
             while ((match = linkRegex.exec(escaped)) !== null) {
@@ -297,7 +286,6 @@
                 content: escaped.substring(lastIndex)
             });
             
-            // Обрабатываем URL только в текстовых частях
             const urlRegex = /(https?:\/\/[^\s<"')]+)(?![^<]*>)/g;
             escaped = parts.map(part => {
                 if (part.type === 'text') {
@@ -329,7 +317,7 @@
             escaped = escaped.replace(/^&gt;&gt; (.*)$/gm, '<blockquote class="tg-quote level-2">$1</blockquote>');
             escaped = escaped.replace(/^&gt; (.*)$/gm, '<blockquote class="tg-quote level-1">$1</blockquote>');
 
-            // 6. @упоминания и хэштеги (но не внутри ссылок)
+            // 6. @упоминания и хэштеги
             parts = [];
             lastIndex = 0;
             const tagRegex = /<a[^>]*>.*?<\/a>|<[^>]+>/g;
@@ -395,17 +383,169 @@
         };
     };
 
+    // ==================== НОВЫЙ API ДЛЯ ПОЛНЫХ СООБЩЕНИЙ ====================
+    const MessageAPI = {
+        /**
+         * Загрузить полное сообщение по ID
+         */
+        async fetchFullMessage(messageId) {
+            if (!Security.validateMessageId(messageId)) return null;
+            
+            // Проверяем кэш
+            if (State.fullMessageCache.has(messageId)) {
+                return State.fullMessageCache.get(messageId);
+            }
+            
+            // Предотвращаем множественные запросы
+            if (State.loadingMessages.has(messageId)) {
+                return new Promise(resolve => {
+                    const checkInterval = setInterval(() => {
+                        if (State.fullMessageCache.has(messageId)) {
+                            clearInterval(checkInterval);
+                            resolve(State.fullMessageCache.get(messageId));
+                        }
+                    }, 100);
+                    safeSetTimeout(() => {
+                        clearInterval(checkInterval);
+                        resolve(null);
+                    }, 5000);
+                });
+            }
+            
+            State.loadingMessages.add(messageId);
+            
+            try {
+                const url = `${CONFIG.API_BASE}/api/${CONFIG.API_VERSION}/messages/${messageId}?channel_id=${CONFIG.CHANNEL_ID}`;
+                const response = await fetch(url);
+                
+                if (!response.ok) {
+                    if (response.status === 404) {
+                        console.log(`Message ${messageId} not found`);
+                        return null;
+                    }
+                    throw new Error(`HTTP ${response.status}`);
+                }
+                
+                const data = await response.json();
+                
+                // Сохраняем в кэш
+                State.fullMessageCache.set(messageId, data);
+                
+                // Ограничиваем размер кэша
+                if (State.fullMessageCache.size > 200) {
+                    const firstKey = State.fullMessageCache.keys().next().value;
+                    State.fullMessageCache.delete(firstKey);
+                }
+                
+                return data;
+                
+            } catch (err) {
+                console.error(`Error fetching full message ${messageId}:`, err);
+                return null;
+            } finally {
+                State.loadingMessages.delete(messageId);
+            }
+        },
+        
+        /**
+         * Загрузить несколько сообщений одним запросом
+         */
+        async fetchBatchMessages(messageIds) {
+            if (!messageIds || messageIds.length === 0) return {};
+            
+            // Фильтруем уже загруженные
+            const neededIds = messageIds.filter(id => !State.fullMessageCache.has(id));
+            if (neededIds.length === 0) {
+                const result = {};
+                messageIds.forEach(id => {
+                    if (State.fullMessageCache.has(id)) {
+                        result[id] = State.fullMessageCache.get(id);
+                    }
+                });
+                return result;
+            }
+            
+            try {
+                const response = await fetch(`${CONFIG.API_BASE}/api/${CONFIG.API_VERSION}/messages/batch`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        channel_id: parseInt(CONFIG.CHANNEL_ID),
+                        message_ids: neededIds
+                    })
+                });
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}`);
+                }
+                
+                const data = await response.json();
+                
+                // Сохраняем в кэш
+                if (data.messages) {
+                    Object.entries(data.messages).forEach(([id, msg]) => {
+                        State.fullMessageCache.set(parseInt(id), msg);
+                    });
+                }
+                
+                // Возвращаем все запрошенные (включая уже загруженные)
+                const result = {};
+                messageIds.forEach(id => {
+                    if (State.fullMessageCache.has(id)) {
+                        result[id] = State.fullMessageCache.get(id);
+                    }
+                });
+                
+                return result;
+                
+            } catch (err) {
+                console.error('Error fetching batch messages:', err);
+                return {};
+            }
+        },
+        
+        /**
+         * Инвалидировать кэш сообщения
+         */
+        invalidateMessage(messageId) {
+            State.fullMessageCache.delete(messageId);
+        }
+    };
+
+    // ==================== API (старый, для совместимости) ====================
     const API = {
         async fetchMessages(offset = 0, limit = CONFIG.INITIAL_LIMIT) {
             try {
                 const response = await fetch(`${CONFIG.API_BASE}/api/channel/posts?channel_id=${CONFIG.CHANNEL_ID}&offset=${offset}&limit=${limit}`);
                 if (!response.ok) throw new Error(`HTTP ${response.status}`);
                 const data = await response.json();
+                
+                // Загружаем полные данные для каждого сообщения
+                if (data.posts && data.posts.length > 0) {
+                    const messageIds = data.posts.map(p => p.message_id);
+                    const fullMessages = await MessageAPI.fetchBatchMessages(messageIds);
+                    
+                    // Обновляем посты полными данными
+                    data.posts = data.posts.map(post => {
+                        if (fullMessages[post.message_id]) {
+                            return {
+                                ...post,
+                                ...fullMessages[post.message_id],
+                                // Сохраняем оригинальные поля, которые могут отсутствовать в full
+                                media_type: fullMessages[post.message_id].media_type || post.media_type,
+                                has_media: !!(fullMessages[post.message_id].media_type || post.media_type)
+                            };
+                        }
+                        return post;
+                    });
+                }
+                
                 return {
                     messages: data.posts || [],
                     hasMore: (data.posts || []).length === limit
                 };
             } catch (err) {
+                console.error('Error fetching messages:', err);
                 return { messages: [], hasMore: false };
             }
         },
@@ -418,6 +558,23 @@
                     throw new Error(`HTTP ${response.status}`);
                 }
                 const data = await response.json();
+                
+                // Загружаем полные данные
+                if (data.posts && data.posts.length > 0) {
+                    const messageIds = data.posts.map(p => p.message_id);
+                    const fullMessages = await MessageAPI.fetchBatchMessages(messageIds);
+                    
+                    data.posts = data.posts.map(post => {
+                        if (fullMessages[post.message_id]) {
+                            return {
+                                ...post,
+                                ...fullMessages[post.message_id]
+                            };
+                        }
+                        return post;
+                    });
+                }
+                
                 return data;
             } catch (err) {
                 console.error('Error fetching messages since:', err);
@@ -459,7 +616,9 @@
                     }
                     return data;
                 }
-            } catch (err) {}
+            } catch (err) {
+                console.error(`Error fetching media for ${messageId}:`, err);
+            }
             return null;
         },
         
@@ -544,7 +703,6 @@
         init() {
             this.video = document.getElementById('bgVideo');
             if (this.video) {
-                // Проверяем поддержку формата
                 if (this.video.canPlayType) {
                     const canPlay = this.video.canPlayType('video/mp4');
                     if (canPlay === 'probably' || canPlay === 'maybe') {
@@ -582,7 +740,6 @@
         showVideo() {
             if (this.video) {
                 this.video.classList.add('visible');
-                // Пытаемся воспроизвести
                 this.video.play().catch(() => {});
             }
         },
@@ -605,7 +762,6 @@
             }
             State.isTransitioning = true;
             
-            // Останавливаем видео при переключении
             this.hideVideo();
             
             const newTheme = State.theme === 'dark' ? 'light' : 'dark';
@@ -624,7 +780,6 @@
         }
     };
 
-    // ==================== МЕДИА МЕНЕДЖЕР (ВЫНЕСЕН) ====================
     const MediaManager = {
         replaceMediaContainer(postEl, html, messageId) {
             const old = postEl.querySelector('.media-container, .media-loading, .media-unavailable, .media-placeholder');
@@ -634,12 +789,8 @@
             
             const newContainer = postEl.querySelector('.media-container');
             if (newContainer) {
-                // Удаляем старые обработчики через клон (безопасно)
                 newContainer.replaceWith(newContainer.cloneNode(true));
                 const freshContainer = postEl.querySelector('.media-container');
-                
-                // Добавляем один обработчик через делегирование (не напрямую)
-                // Сам обработчик будет на #feed, но нам нужна ссылка на данные
                 freshContainer.dataset.messageId = messageId;
             }
             
@@ -670,7 +821,6 @@
                         video.load();
                         mediaContainer.classList.add('media-unloaded');
                         
-                        // Добавляем плейсхолдер, если его нет
                         if (!mediaContainer.querySelector('.media-placeholder')) {
                             const placeholder = document.createElement('div');
                             placeholder.className = 'media-placeholder';
@@ -707,15 +857,12 @@
             if (mediaContainer && mediaContainer.classList.contains('media-unloaded')) {
                 const post = State.posts.get(messageId);
                 if (post && post.media_url) {
-                    // Удаляем плейсхолдер
                     const placeholder = mediaContainer.querySelector('.media-placeholder');
                     if (placeholder) placeholder.remove();
                     
-                    // Восстанавливаем медиа
-                    const html = UI.renderMedia(post.media_url, post.media_type, false); // false = не добавлять обработчик
+                    const html = UI.renderMedia(post.media_url, post.media_type, false);
                     this.replaceMediaContainer(postEl, html, messageId);
                     
-                    // Автозапуск для видео
                     const newVideo = postEl.querySelector('video');
                     if (newVideo && UI.isElementInViewport(postEl)) {
                         newVideo.play().catch(() => {});
@@ -730,7 +877,6 @@
             const post = State.posts.get(messageId);
             if (!post || !post.has_media || post.media_url) return;
             
-            // Проверяем pendingMedia
             const pendingMedia = State.pendingMedia.get(messageId);
             if (pendingMedia) {
                 post.media_url = pendingMedia.media_url;
@@ -762,7 +908,6 @@
                     }
                 });
                 
-                // Добавляем повторную попытку
                 if (!State.mediaRetryTimeouts.has(messageId)) {
                     const timeoutId = safeSetTimeout(() => {
                         if (!post.media_url) {
@@ -815,7 +960,6 @@
             const posts = document.querySelectorAll('.post');
             if (posts.length === 0) return;
             
-            // Ограничиваем кэш до 20 постов для экономии памяти
             const postsToCache = Array.from(posts).slice(-20);
             const fragment = document.createDocumentFragment();
             postsToCache.forEach(post => {
@@ -846,7 +990,6 @@
             return true;
         },
         
-        // Вспомогательный метод для проверки видимости
         isElementInViewport(el) {
             const rect = el.getBoundingClientRect();
             return (
@@ -905,7 +1048,6 @@
             }
         },
         
-        // ИСПРАВЛЕНО: Без добавления обработчика
         renderMedia(url, type, addClickPlaceholder = true) {
             if (!url) return '';
             const fullUrl = url.startsWith('http') ? url : `${CONFIG.API_BASE}${url}`;
@@ -926,7 +1068,6 @@
                 isVideo = true;
             }
             
-            // Добавляем data-атрибут для делегированного обработчика
             const dataAttr = addClickPlaceholder ? '' : ' data-media-container="true"';
             
             if (isVideo) {
@@ -984,7 +1125,7 @@
             }
         },
         
-        // ИСПРАВЛЕНО: Создание поста без прямых обработчиков
+        // ИСПРАВЛЕНО: Создание поста с полными данными
         createPostElement(post) {
             const postEl = document.createElement('div');
             postEl.className = 'post';
@@ -996,7 +1137,6 @@
             const views = Formatters.formatViews(post.views);
             const text = Formatters.formatText(post.text);
             
-            // Проверяем pendingMedia
             const pendingMedia = State.pendingMedia.get(post.message_id);
             let mediaHTML = '';
             if (pendingMedia) {
@@ -1040,7 +1180,6 @@
             return postEl;
         },
         
-        // ИСПРАВЛЕНО: Обновление поста с использованием MediaManager
         updatePost(messageId, data) {
             const postEl = document.querySelector(`.post[data-message-id="${messageId}"]`);
             if (!postEl) {
@@ -1136,6 +1275,7 @@
                 if (index !== -1) State.postOrder.splice(index, 1);
                 API.cancelMediaPoll(messageId);
                 State.pendingMedia.delete(messageId);
+                State.fullMessageCache.delete(messageId);
             }, 300);
             
             return true;
@@ -1197,7 +1337,6 @@
                 MediaManager.loadMedia(post.message_id);
             }
             
-            // Обновляем порядок
             State.postOrder.sort((a, b) => b - a);
         },
         
@@ -1286,7 +1425,6 @@
                         }
                     });
                     
-                    // Сортируем
                     State.postOrder.sort((a, b) => b - a);
                     
                     if (newMessages.length > 0) {
@@ -1302,6 +1440,7 @@
                     State.hasMore = false;
                 }
             } catch (err) {
+                console.error('Error loading messages:', err);
             } finally {
                 State.isLoading = false;
                 UI.setLoaderVisible(false);
@@ -1339,6 +1478,7 @@
         error(message) { this.show(message, 'error'); }
     };
 
+    // ==================== НОВЫЙ WEBSOCKET МЕНЕДЖЕР ====================
     const WebSocketManager = {
         connect() {
             try {
@@ -1359,12 +1499,10 @@
                         console.log(`Subscribed to channel ${CONFIG.CHANNEL_ID}`);
                     }
                     
-                    // Синхронизация после подключения
                     if (CONFIG.SYNC_AFTER_RECONNECT && State.postOrder.length > 0) {
                         this.syncAfterReconnect();
                     }
                     
-                    // Сохраняем ping interval для очистки
                     State.wsPingInterval = safeSetInterval(() => {
                         if (State.ws && State.ws.readyState === WebSocket.OPEN) {
                             State.ws.send(JSON.stringify({ type: 'ping' }));
@@ -1410,8 +1548,6 @@
             try {
                 const data = await API.fetchMessagesSince(lastPostId, 50);
                 if (data.posts && data.posts.length > 0) {
-                    // Добавляем пропущенные посты (они уже новые, идут по возрастанию ID)
-                    // Поэтому добавляем их в обратном порядке, чтобы сохранить хронологию
                     const newPosts = data.posts.reverse();
                     newPosts.forEach(post => {
                         if (!State.posts.has(post.message_id)) {
@@ -1421,9 +1557,7 @@
                         }
                     });
                     
-                    // Финальная сортировка
                     State.postOrder.sort((a, b) => b - a);
-                    
                     Toast.info(`Загружено ${newPosts.length} пропущенных сообщений`);
                 }
             } catch (err) {
@@ -1438,14 +1572,20 @@
                     console.log(`Successfully subscribed to channel ${data.channel_id}`);
                 }
                 if (data.type === 'welcome') {
-                    console.log('Received welcome from server');
+                    console.log('Received welcome from server, protocol version:', data.version);
                 }
+                return;
+            }
+            
+            // Проверяем версию протокола
+            if (data.version !== '2.0') {
+                console.warn(`Unsupported protocol version: ${data.version}`);
                 return;
             }
             
             if (data.channel_id !== parseInt(CONFIG.CHANNEL_ID)) return;
             
-            const messageKey = `${data.channel_id}-${data.message_id}`;
+            const messageKey = `${data.channel_id}-${data.message_id}-${data.type}`;
             const lastReceived = State.recentMessages.get(messageKey);
             if (lastReceived && (Date.now() - lastReceived < CONFIG.DEDUP_TTL)) {
                 console.log('Duplicate message ignored:', messageKey);
@@ -1461,7 +1601,7 @@
                 }
             }
             
-            console.log('WebSocket message received:', data.type, data);
+            console.log('WebSocket message received:', data.type, data.message_id);
             
             switch (data.type) {
                 case 'new':
@@ -1473,53 +1613,96 @@
                 case 'delete':
                     this.handleDeleteMessage(data);
                     break;
-                case 'media_ready':
-                    this.handleMediaReady(data);
-                    break;
-                case 'history':
-                    this.handleHistory(data);
-                    break;
                 default:
                     console.log('Unknown message type:', data.type);
             }
         },
         
-        handleHistory(data) {
-            if (data.messages && Array.isArray(data.messages)) {
-                console.log(`Received ${data.messages.length} historical messages`);
-                
-                data.messages.forEach(msg => {
-                    if (!State.posts.has(msg.message_id)) {
-                        this.handleNewMessage(msg, true);
-                    }
-                });
-            }
-        },
-        
-        handleNewMessage(data, isHistorical = false) {
+        // НОВЫЙ: Обработка нового сообщения
+        async handleNewMessage(data) {
             if (State.posts.has(data.message_id)) {
                 console.log('Message already exists:', data.message_id);
                 return;
             }
             
-            const hasMedia = !!(data.media_type || data.media_url);
-            let mediaType = data.media_type;
-            if (!mediaType && data.media_url) {
-                mediaType = data.media_url.match(/\.(mp4|webm|mov)$/i) ? 'video' : 'photo';
+            // Если данные уже есть в сообщении (для обратной совместимости)
+            if (data.data) {
+                this.processFullMessage(data.data);
+                return;
+            }
+            
+            // Иначе загружаем полные данные
+            const fullMessage = await MessageAPI.fetchFullMessage(data.message_id);
+            if (fullMessage) {
+                this.processFullMessage(fullMessage);
+            } else {
+                console.error(`Failed to load full message ${data.message_id}`);
+            }
+        },
+        
+        // НОВЫЙ: Обработка редактирования
+        async handleEditMessage(data) {
+            // Инвалидируем кэш
+            MessageAPI.invalidateMessage(data.message_id);
+            
+            // Загружаем обновлённые данные
+            const fullMessage = await MessageAPI.fetchFullMessage(data.message_id);
+            if (fullMessage) {
+                this.processFullMessage(fullMessage, true);
+            } else {
+                console.error(`Failed to load edited message ${data.message_id}`);
+            }
+        },
+        
+        // НОВЫЙ: Обработка полного сообщения
+        processFullMessage(fullMessage, isEdit = false) {
+            const messageId = fullMessage.message_id;
+            
+            // Проверяем, есть ли уже пост
+            if (!isEdit && State.posts.has(messageId)) {
+                return;
             }
             
             const post = {
-                message_id: data.message_id,
-                text: data.text || '',
-                date: data.date || new Date().toISOString(),
-                views: data.views || 0,
-                has_media: hasMedia,
-                media_type: mediaType,
-                media_url: data.media_url,
-                media_pending: data.media_pending || (hasMedia && !data.media_url),
-                is_edited: false
+                message_id: messageId,
+                text: fullMessage.text || '',
+                date: fullMessage.date,
+                views: fullMessage.views || 0,
+                has_media: fullMessage.has_media || !!fullMessage.media,
+                media_type: fullMessage.media?.file_type || fullMessage.media_type,
+                media_url: fullMessage.media?.url,
+                media_pending: fullMessage.media && !fullMessage.media.uploaded,
+                is_edited: fullMessage.is_edited || false,
+                edit_date: fullMessage.edit_date
             };
             
+            if (isEdit) {
+                // Обновляем существующий пост
+                if (State.posts.has(messageId)) {
+                    State.posts.set(messageId, post);
+                    UI.updatePost(messageId, {
+                        text: post.text,
+                        edit_date: post.edit_date,
+                        media_url: post.media_url,
+                        media_type: post.media_type
+                    });
+                } else {
+                    // Если пост не найден, добавляем как новый
+                    this.addPost(post);
+                }
+            } else {
+                // Добавляем новый пост
+                this.addPost(post);
+            }
+            
+            // Если есть медиа, запускаем загрузку
+            if (post.has_media && !post.media_url) {
+                MediaManager.loadMedia(messageId);
+            }
+        },
+        
+        // НОВЫЙ: Добавление поста
+        addPost(post) {
             if (window.scrollY < 200) {
                 console.log('Adding new post immediately:', post.message_id);
                 UI.addPostToTop(post);
@@ -1530,59 +1713,6 @@
                 console.log('Queuing new post:', post.message_id);
                 State.newPosts.push(post);
                 UI.updateNewPostsBadge();
-            }
-            
-            if (hasMedia && !data.media_url) {
-                this.handleMediaForMessage(post, data);
-            }
-        },
-        
-        handleMediaReady(data) {
-            console.log('Media ready for message:', data.message_id);
-            
-            const post = State.posts.get(data.message_id);
-            
-            if (post) {
-                if (data.media_url) {
-                    post.media_url = data.media_url;
-                    post.media_pending = false;
-                    
-                    UI.updatePost(data.message_id, {
-                        media_url: data.media_url,
-                        media_type: post.media_type
-                    });
-                }
-            } else {
-                State.pendingMedia.set(data.message_id, {
-                    media_url: data.media_url,
-                    media_type: data.media_type
-                });
-            }
-        },
-        
-        handleEditMessage(data) {
-            console.log('Edit message:', data.message_id);
-            
-            if (State.posts.has(data.message_id)) {
-                const post = State.posts.get(data.message_id);
-                if (data.text !== undefined) post.text = data.text;
-                if (data.media_url) {
-                    post.media_url = data.media_url;
-                    post.media_pending = false;
-                }
-                if (data.media_type) post.media_type = data.media_type;
-                post.is_edited = true;
-                post.edit_date = data.edit_date;
-                State.posts.set(data.message_id, post);
-                
-                UI.updatePost(data.message_id, {
-                    text: data.text,
-                    edit_date: data.edit_date,
-                    media_url: data.media_url,
-                    media_type: data.media_type
-                });
-            } else {
-                console.log('Edit for unknown post, ignoring:', data.message_id);
             }
         },
         
@@ -1596,19 +1726,7 @@
             UI.deletePost(data.message_id);
             API.cancelMediaPoll(data.message_id);
             State.pendingMedia.delete(data.message_id);
-        },
-        
-        handleMediaForMessage(post, data) {
-            API.pollMedia(data.message_id, (url, failed) => {
-                if (url) {
-                    post.media_url = url;
-                    post.media_pending = false;
-                    UI.updatePost(data.message_id, { media_url: url });
-                } else if (failed) {
-                    post.media_pending = false;
-                    UI.updatePostMediaUnavailable(data.message_id);
-                }
-            });
+            State.fullMessageCache.delete(data.message_id);
         },
         
         flushNewPosts() {
