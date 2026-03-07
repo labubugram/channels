@@ -15,7 +15,7 @@
         MAX_VISIBLE_POSTS: 100,
         LAZY_LOAD_OFFSET: 500,
         IMAGE_UNLOAD_DISTANCE: 5000,
-        DEDUP_TTL: 1000, // Отключаем дедупликацию для тестирования
+        DEDUP_TTL: 500, // Отключаем дедупликацию для тестирования
         WS_BASE: (() => {
             const apiBase = document.querySelector('meta[name="mirror:api-base"]')?.content || 'https://0808.us.nekhebet.su:8081';
             return apiBase.replace('http://', 'ws://').replace('https://', 'wss://');
@@ -60,8 +60,7 @@
         fullMessageCache: new Map(),
         loadingMessages: new Set(),
         initialLoadComplete: false,
-        pendingEvents: [],
-        updateQueue: new Map() // Очередь обновлений
+        pendingEvents: []
     };
 
     function cleanupResources() {
@@ -382,7 +381,6 @@
         async fetchFullMessage(messageId) {
             if (!Security.validateMessageId(messageId)) return null;
             
-            // Принудительно пропускаем кэш для редактирования
             if (State.fullMessageCache.has(messageId)) {
                 console.log(`Using cached message ${messageId}`);
                 return State.fullMessageCache.get(messageId);
@@ -579,7 +577,10 @@
                 const response = await fetch(url);
                 
                 if (!response.ok) {
-                    if (response.status === 404) return null;
+                    if (response.status === 404) {
+                        console.log(`Media for message ${messageId} not ready yet (404)`);
+                        return null;
+                    }
                     throw new Error(`HTTP ${response.status}`);
                 }
                 
@@ -854,6 +855,8 @@
             const post = State.posts.get(messageId);
             if (!post || !post.has_media || post.media_url) return;
             
+            console.log(`Loading media for message ${messageId}`);
+            
             const pendingMedia = State.pendingMedia.get(messageId);
             if (pendingMedia) {
                 post.media_url = pendingMedia.media_url;
@@ -868,36 +871,33 @@
             
             API.fetchMedia(messageId).then(mediaInfo => {
                 if (mediaInfo && mediaInfo.url) {
+                    console.log(`Media loaded for message ${messageId}:`, mediaInfo.url);
                     post.media_url = mediaInfo.url;
                     post.media_type = mediaInfo.file_type || post.media_type;
                     UI.updatePost(messageId, {
                         media_url: mediaInfo.url,
                         media_type: post.media_type
                     });
+                } else {
+                    console.log(`Media not ready for message ${messageId}, will retry later`);
+                    this.retryMediaLoad(messageId);
                 }
-            }).catch(() => {
-                API.pollMedia(messageId, (url, failed) => {
-                    if (url) {
+            }).catch(err => {
+                console.log(`Media fetch failed for ${messageId}:`, err.message);
+                this.retryMediaLoad(messageId);
+            });
+        },
+
+        retryMediaLoad(messageId) {
+            API.pollMedia(messageId, (url, failed) => {
+                if (url) {
+                    const post = State.posts.get(messageId);
+                    if (post) {
                         post.media_url = url;
                         UI.updatePost(messageId, { media_url: url });
-                    } else if (failed) {
-                        UI.updatePostMediaUnavailable(messageId);
                     }
-                });
-                
-                if (!State.mediaRetryTimeouts.has(messageId)) {
-                    const timeoutId = safeSetTimeout(() => {
-                        if (!post.media_url) {
-                            API.fetchMedia(messageId).then(mediaInfo => {
-                                if (mediaInfo && mediaInfo.url) {
-                                    post.media_url = mediaInfo.url;
-                                    UI.updatePost(messageId, { media_url: mediaInfo.url });
-                                }
-                            });
-                        }
-                        State.mediaRetryTimeouts.delete(messageId);
-                    }, CONFIG.MEDIA_RETRY_DELAY);
-                    State.mediaRetryTimeouts.set(messageId, timeoutId);
+                } else if (failed) {
+                    UI.updatePostMediaUnavailable(messageId);
                 }
             });
         }
@@ -1348,7 +1348,10 @@
             this.trimOldPosts();
             
             if (post.has_media && !post.media_url) {
-                MediaManager.loadMedia(post.message_id);
+                // Даем небольшую задержку перед загрузкой медиа
+                safeSetTimeout(() => {
+                    MediaManager.loadMedia(post.message_id);
+                }, 1000);
             }
             
             State.postOrder.sort((a, b) => b - a);
@@ -1725,36 +1728,65 @@
                 edit_date: fullMessage.edit_date
             };
             
+            // Проверяем существующее сообщение
+            const existingPost = State.posts.get(messageId);
+            
             if (isEdit) {
-                // Всегда обновляем State.posts
-                State.posts.set(messageId, post);
-                
-                // Пытаемся обновить в DOM
-                const updated = UI.updatePost(messageId, post);
-                
-                if (!updated) {
-                    console.log(`Post ${messageId} not found in DOM, checking newPosts queue`);
+                if (existingPost) {
+                    // Обновляем существующее
+                    State.posts.set(messageId, post);
                     
-                    // Проверяем очередь новых постов
+                    // Важно: проверяем, появилось ли медиа
+                    if (!existingPost.media_url && post.media_url) {
+                        console.log(`Media now available for message ${messageId}`);
+                        UI.updatePost(messageId, post);
+                    } else {
+                        // Обычное обновление (текст, дата и т.д.)
+                        UI.updatePost(messageId, post);
+                    }
+                } else {
+                    // Сообщения нет в State - возможно в очереди
+                    console.log(`Post ${messageId} not in State.posts, checking newPosts queue`);
+                    
                     const indexInNew = State.newPosts.findIndex(p => p.message_id === messageId);
                     if (indexInNew !== -1) {
                         console.log(`Updating message ${messageId} in newPosts queue`);
                         State.newPosts[indexInNew] = post;
                     } else {
-                        console.warn(`Edit for non-existent message ${messageId}, adding as new`);
-                        this.addPost(post);
+                        // Это может быть edit для сообщения, которое мы только что добавили
+                        // или сообщение с задержкой медиа - не добавляем повторно
+                        console.log(`Edit for message ${messageId} - might be media ready notification`);
+                        State.posts.set(messageId, post);
                     }
                 }
             } else {
+                // Новое сообщение
                 this.addPost(post);
             }
             
+            // Загружаем медиа, если оно есть, но еще не загружено
             if (post.has_media && !post.media_url) {
-                MediaManager.loadMedia(messageId);
+                console.log(`Scheduling media load for message ${messageId}`);
+                // Даем небольшую задержку перед первой попыткой загрузки медиа
+                safeSetTimeout(() => {
+                    MediaManager.loadMedia(messageId);
+                }, 1000);
+            }
+            
+            // Если медиа появилось в edit, но уже было в new - обновляем
+            if (isEdit && existingPost && !existingPost.media_url && post.media_url) {
+                console.log(`Media ready for message ${messageId}, updating immediately`);
+                UI.updatePost(messageId, post);
             }
         },
         
         addPost(post) {
+            // Проверяем, нет ли уже такого сообщения
+            if (State.posts.has(post.message_id)) {
+                console.log(`Post ${post.message_id} already exists, skipping add`);
+                return;
+            }
+            
             if (window.scrollY < 200) {
                 console.log('Adding new post immediately:', post.message_id);
                 UI.addPostToTop(post);
@@ -1762,9 +1794,15 @@
                 State.postOrder.unshift(post.message_id);
                 State.postOrder.sort((a, b) => b - a);
             } else {
-                console.log('Queuing new post:', post.message_id);
-                State.newPosts.push(post);
-                UI.updateNewPostsBadge();
+                // Проверяем, нет ли уже в очереди
+                const existsInQueue = State.newPosts.some(p => p.message_id === post.message_id);
+                if (!existsInQueue) {
+                    console.log('Queuing new post:', post.message_id);
+                    State.newPosts.push(post);
+                    UI.updateNewPostsBadge();
+                } else {
+                    console.log(`Post ${post.message_id} already in queue, skipping`);
+                }
             }
         },
         
