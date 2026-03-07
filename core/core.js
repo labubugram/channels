@@ -15,7 +15,7 @@
         MAX_VISIBLE_POSTS: 100,
         LAZY_LOAD_OFFSET: 500,
         IMAGE_UNLOAD_DISTANCE: 5000,
-        DEDUP_TTL: 500,
+        DEDUP_TTL: 1000, // Отключаем дедупликацию для тестирования
         WS_BASE: (() => {
             const apiBase = document.querySelector('meta[name="mirror:api-base"]')?.content || 'https://0808.us.nekhebet.su:8081';
             return apiBase.replace('http://', 'ws://').replace('https://', 'wss://');
@@ -60,7 +60,8 @@
         fullMessageCache: new Map(),
         loadingMessages: new Set(),
         initialLoadComplete: false,
-        pendingEvents: []
+        pendingEvents: [],
+        updateQueue: new Map() // Очередь обновлений
     };
 
     function cleanupResources() {
@@ -381,7 +382,9 @@
         async fetchFullMessage(messageId) {
             if (!Security.validateMessageId(messageId)) return null;
             
+            // Принудительно пропускаем кэш для редактирования
             if (State.fullMessageCache.has(messageId)) {
+                console.log(`Using cached message ${messageId}`);
                 return State.fullMessageCache.get(messageId);
             }
             
@@ -404,6 +407,7 @@
             
             try {
                 const url = `${CONFIG.API_BASE}/api/${CONFIG.API_VERSION}/messages/${messageId}?channel_id=${CONFIG.CHANNEL_ID}`;
+                console.log(`Fetching message ${messageId} from API`);
                 const response = await fetch(url);
                 
                 if (!response.ok) {
@@ -485,6 +489,7 @@
         },
         
         invalidateMessage(messageId) {
+            console.log(`Invalidating cache for message ${messageId}`);
             State.fullMessageCache.delete(messageId);
         }
     };
@@ -1154,6 +1159,7 @@
         updatePost(messageId, data) {
             const postEl = document.querySelector(`.post[data-message-id="${messageId}"]`);
             if (!postEl) {
+                console.log(`Post ${messageId} not in DOM, storing in pendingMedia`);
                 if (data.media_url) {
                     State.pendingMedia.set(messageId, {
                         media_url: data.media_url,
@@ -1163,46 +1169,62 @@
                 return false;
             }
             
+            console.log(`Updating post ${messageId} in DOM`);
             let changed = false;
             
             if (data.text !== undefined) {
                 const textEl = postEl.querySelector('.post-text');
                 if (textEl) {
-                    textEl.innerHTML = Formatters.formatText(data.text || '');
-                    changed = true;
+                    const newText = Formatters.formatText(data.text || '');
+                    if (textEl.innerHTML !== newText) {
+                        textEl.innerHTML = newText;
+                        changed = true;
+                        console.log(`Text updated for ${messageId}`);
+                    }
                 }
             }
             
             if (data.edit_date) {
                 const dateEl = postEl.querySelector('.post-date');
                 if (dateEl) {
-                    dateEl.innerHTML = Formatters.formatDate(data.edit_date);
-                    if (!dateEl.innerHTML.includes('(edited)')) {
-                        dateEl.innerHTML += ' <span class="edited-mark">(edited)</span>';
+                    const newDate = Formatters.formatDate(data.edit_date);
+                    if (!dateEl.innerHTML.includes(newDate)) {
+                        dateEl.innerHTML = newDate;
+                        if (!dateEl.innerHTML.includes('(edited)')) {
+                            dateEl.innerHTML += ' <span class="edited-mark">(edited)</span>';
+                        }
+                        changed = true;
+                        console.log(`Date updated for ${messageId}`);
                     }
-                    changed = true;
                 }
             }
             
             if (data.views !== undefined) {
                 const viewsEl = postEl.querySelector('.views-count');
                 if (viewsEl) {
-                    viewsEl.textContent = `👁 ${Formatters.formatViews(data.views)}`;
-                    changed = true;
+                    const newViews = `👁 ${Formatters.formatViews(data.views)}`;
+                    if (viewsEl.textContent !== newViews) {
+                        viewsEl.textContent = newViews;
+                        changed = true;
+                    }
                 }
             }
             
             if (data.forwards !== undefined) {
                 const forwardsEl = postEl.querySelector('.forwards-count');
                 if (forwardsEl) {
-                    forwardsEl.textContent = `🔁 ${data.forwards}`;
-                    changed = true;
+                    const newForwards = `🔁 ${data.forwards}`;
+                    if (forwardsEl.textContent !== newForwards) {
+                        forwardsEl.textContent = newForwards;
+                        changed = true;
+                    }
                 }
             }
             
             if (data.media_url) {
                 const mediaContainer = postEl.querySelector('.media-container, .media-loading, .media-unavailable');
                 if (mediaContainer) {
+                    console.log(`Updating media for ${messageId}`);
                     const newMedia = this.renderMedia(data.media_url, data.media_type, true);
                     MediaManager.replaceMediaContainer(postEl, newMedia, messageId);
                     
@@ -1212,6 +1234,7 @@
                 } else {
                     const postContent = postEl.querySelector('.post-content');
                     if (postContent) {
+                        console.log(`Adding media container for ${messageId}`);
                         const newMedia = this.renderMedia(data.media_url, data.media_type, true);
                         postContent.insertAdjacentHTML('beforeend', newMedia);
                         
@@ -1225,6 +1248,9 @@
             if (changed) {
                 postEl.classList.add('updated');
                 safeSetTimeout(() => postEl.classList.remove('updated'), 2000);
+                console.log(`✅ Post ${messageId} updated successfully`);
+            } else {
+                console.log(`No changes for post ${messageId}`);
             }
             
             return changed;
@@ -1263,6 +1289,7 @@
                 API.cancelMediaPoll(messageId);
                 State.pendingMedia.delete(messageId);
                 State.fullMessageCache.delete(messageId);
+                console.log(`Post ${messageId} removed from DOM`);
             }, 300);
             
             return true;
@@ -1667,25 +1694,22 @@
         },
         
         async handleEditMessage(data) {
+            console.log(`Handling edit for message ${data.message_id}`);
             MessageAPI.invalidateMessage(data.message_id);
 
-            const messageData = data.data || data;
-            
-            if (messageData && messageData.message_id) {
-                this.processFullMessage(messageData, true);
+            const fullMessage = await MessageAPI.fetchFullMessage(data.message_id);
+            if (fullMessage) {
+                console.log(`Processing edit for message ${data.message_id} with data:`, fullMessage);
+                this.processFullMessage(fullMessage, true);
             } else {
-
-                const fullMessage = await MessageAPI.fetchFullMessage(data.message_id);
-                if (fullMessage) {
-                    this.processFullMessage(fullMessage, true);
-                } else {
-                    console.error(`Failed to load edited message ${data.message_id}`);
-                }
+                console.error(`Failed to load edited message ${data.message_id}`);
             }
         },
         
         processFullMessage(fullMessage, isEdit = false) {
             const messageId = fullMessage.message_id;
+            
+            console.log(`Processing ${isEdit ? 'edit' : 'new'} message ${messageId}`);
             
             const post = {
                 message_id: messageId,
@@ -1702,13 +1726,24 @@
             };
             
             if (isEdit) {
-                if (State.posts.has(messageId)) {
-
-                    State.posts.set(messageId, post);
-                    UI.updatePost(messageId, post); 
-                } else {
-                    console.warn(`Edit for non-existent message ${messageId}, adding as new`);
-                    this.addPost(post);
+                // Всегда обновляем State.posts
+                State.posts.set(messageId, post);
+                
+                // Пытаемся обновить в DOM
+                const updated = UI.updatePost(messageId, post);
+                
+                if (!updated) {
+                    console.log(`Post ${messageId} not found in DOM, checking newPosts queue`);
+                    
+                    // Проверяем очередь новых постов
+                    const indexInNew = State.newPosts.findIndex(p => p.message_id === messageId);
+                    if (indexInNew !== -1) {
+                        console.log(`Updating message ${messageId} in newPosts queue`);
+                        State.newPosts[indexInNew] = post;
+                    } else {
+                        console.warn(`Edit for non-existent message ${messageId}, adding as new`);
+                        this.addPost(post);
+                    }
                 }
             } else {
                 this.addPost(post);
