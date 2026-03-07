@@ -15,7 +15,7 @@
         MAX_VISIBLE_POSTS: 100,
         LAZY_LOAD_OFFSET: 500,
         IMAGE_UNLOAD_DISTANCE: 5000,
-        DEDUP_TTL: 500, // Отключаем дедупликацию для тестирования
+        DEDUP_TTL: 500,
         WS_BASE: (() => {
             const apiBase = document.querySelector('meta[name="mirror:api-base"]')?.content || 'https://0808.us.nekhebet.su:8081';
             return apiBase.replace('http://', 'ws://').replace('https://', 'wss://');
