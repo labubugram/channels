@@ -1687,34 +1687,25 @@
         processFullMessage(fullMessage, isEdit = false) {
             const messageId = fullMessage.message_id;
             
-            const messageData = fullMessage.data || fullMessage;
-            
             const post = {
                 message_id: messageId,
-                text: messageData.text || '',
-                date: messageData.date,
-                views: messageData.views || 0,
-                forwards: messageData.forwards || 0,
-                has_media: messageData.has_media || !!messageData.media,
-                media_type: messageData.media?.file_type || messageData.media_type,
-                media_url: messageData.media?.url || messageData.media_url, 
-                media_pending: messageData.media && !messageData.media.uploaded,
-                is_edited: messageData.is_edited || false,
-                edit_date: messageData.edit_date
+                text: fullMessage.text || '',
+                date: fullMessage.date,
+                views: fullMessage.views || 0,
+                forwards: fullMessage.forwards || 0,
+                has_media: fullMessage.has_media || !!fullMessage.media,
+                media_type: fullMessage.media?.file_type || fullMessage.media_type,
+                media_url: fullMessage.media?.url || fullMessage.media_url,
+                media_pending: fullMessage.media && !fullMessage.media.uploaded,
+                is_edited: fullMessage.is_edited || false,
+                edit_date: fullMessage.edit_date
             };
             
             if (isEdit) {
                 if (State.posts.has(messageId)) {
+
                     State.posts.set(messageId, post);
-                    UI.updatePost(messageId, {
-                        text: post.text,
-                        edit_date: post.edit_date,
-                        media_url: post.media_url,
-                        media_type: post.media_type,
-                        views: post.views,
-                        forwards: post.forwards,
-                        is_edited: post.is_edited
-                    });
+                    UI.updatePost(messageId, post); 
                 } else {
                     console.warn(`Edit for non-existent message ${messageId}, adding as new`);
                     this.addPost(post);
